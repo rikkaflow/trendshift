@@ -1379,10 +1379,33 @@ function bindControls(){
     if (b.dataset.tf === st.tf && !(b.dataset.tf === 'topics' && st.topicSlug)) return;         // 点当前标签不重复加载
     st.tf = b.dataset.tf; st.period = null; st.q = ''; $('#q').value = ''; st.topicSlug = null;
     st.pendingState = null;
-    // 切栏目等于回到列表根，清掉残留的 hash/state，否则后续返回会跳回旧视图
-    if (location.hash) {
-      try { history.replaceState(null, '', location.pathname + location.search); } catch(e) {}
+    /* 切栏目等于回到列表根，历史栈也必须回到「[根 A][守卫 G]」这个形状：
+       旧实现 replaceState(null) 只是把当前条目抹成空根，栈变成
+       [A][G][空根] → 第一次返回落到 G（静默无提示）、第二次才落到 A（提示），
+       用户要连按三次才退出。
+       正确做法分两种情形：
+         ① 当前在视图里（state.v 非空）：先把自己改写成「无状态根」再 back，
+            吃掉视图那一层，落回上一层的守卫 G → 栈恢复 [A][G]；
+         ② 当前已在根/守卫上：直接改写成守卫条目，保证 guard 标记不丢。 */
+    const cur = history.state || {};
+    if (cur.v) {
+      const depth = cur._d || 1;
+      try { history.replaceState({ v: null, _d: depth }, '', location.pathname + location.search); } catch(e) {}
+      history.back();
+    } else if (location.hash) {
+      const depth = cur._d || 1;
+      try {
+        history.replaceState({ v: null, _d: depth, guard: 1 },
+                             '', location.pathname + location.search);
+        onGuard = true;
+      } catch(e) {
+        try { history.replaceState(null, '', location.pathname + location.search); } catch(e2) {}
+      }
     }
+    /* 现在渲染的是列表根，不是视图：不置 false 的话 popstate 会把这次返回
+       当成「从视图返回」，再补一条守卫，返回计数继续错乱。 */
+    curView = false;
+    hideExitHint();
     resetPaging();
     buildControls();
     if (BOARD.has(st.tf)) loadLangs();
@@ -1700,12 +1723,31 @@ function renderState(state){
   if (state.v === 'topic') {
     /* 该栏目可能已在排序面板里被隐藏：不能再进二级页，
        否则「完成」的 back 会把用户带回刚隐藏的栏目。
-       同时把 URL 里的 #topic=... 清掉，避免刷新后再次落到隐藏栏目。 */
+       同时把 URL 里的 #topic=... 清掉，避免刷新后再次落到隐藏栏目。
+       ★ 降级后渲染的是列表根，所以必须同时 ①curView=false ②把当前条目
+       改写成守卫（保留 _d），否则 popstate 会把下一次返回当成「从视图返回」，
+       静默补一条守卫，用户要连按三次才退出。 */
     if (st.hidden && st.hidden.has('topics')) {
+      const depth = (history.state && history.state._d) || 1;
+      if (depth > 1) {
+        /* 正常情况：这条 topic 记录压在守卫之上，back 一层就回到 [A][G]。
+           同时把本条改写成无状态根，避免 back 过程中被当成视图重复渲染。 */
+        try { history.replaceState({ v: null, _d: depth - 1 }, '', location.pathname + location.search); } catch(e) {}
+        curView = false;
+        hideExitHint();
+        history.back();
+        return;
+      }
+      /* 冷启动直达 #topic（栈底就是这条）：不能 back，原地改写成守卫。 */
       try {
-        history.replaceState({ v: null, _d: (history.state && history.state._d) || 1 },
+        history.replaceState({ v: null, _d: 1, guard: 1 },
                              '', location.pathname + location.search);
-      } catch(e) {}
+        onGuard = true;
+      } catch(e) {
+        try { history.replaceState({ v: null, _d: 1 }, '', location.pathname + location.search); } catch(e2) {}
+      }
+      curView = false;
+      hideExitHint();
       renderState(null);
       return;
     }
