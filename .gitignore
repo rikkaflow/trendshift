@@ -8,3 +8,6 @@ Thumbs.db
 
 # 本地临时
 /node_modules/
+
+# bundle 备份（二进制，走 GitHub 与 backup/ 目录）
+*.bundle
