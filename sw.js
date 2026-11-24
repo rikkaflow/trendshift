@@ -1,4 +1,4 @@
-const CACHE = 'trendshift-v6';
+const CACHE = 'trendshift-v7';
 
 /* 弱网/假连接时 fetch 可能长时间不返回，用户会被卡在骨架屏 */
 function withTimeout(promise, ms){
@@ -34,14 +34,22 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
 
   if (url.origin === location.origin && !url.pathname.startsWith('/api/')) {
-    /* ★ 这里必须带超时：同源静态资源（含 tr.json）走网络优先，
+    /* ★ 这里必须带超时：同源静态资源走网络优先，
        弱网「连上了但不通」时 fetch 会死等到浏览器/系统超时（可达 20 秒以上），
-       期间整页停在骨架屏。4 秒拿不到就先用缓存，后台照常更新。 */
+       期间整页停在骨架屏。
+    ★★ 但 tr.json 不能套 4 秒：它是 390 KB+ 且每天增长，
+       弱网/移动端首次拉取很容易超过 4 秒，超时后本地又没有缓存 → 直接 503，
+       index.html 的 20 秒预算形同虚设，整站退化到实时翻译（耗 Gemini 额度 + 慢）。
+       首次访问 = 缓存里没有 tr.json，这一档必须给足。 */
+    const isTr = url.pathname === '/tr.json';
+    const budget = isTr ? 18000 : 4000;
     e.respondWith(
-      withTimeout(fetch(req), 4000).then(r => {
+      withTimeout(fetch(req), budget).then(r => {
         if (r.ok) {
           const cp = r.clone();
-          caches.open(CACHE).then(c => c.put(req, cp));
+          /* waitUntil 托底：不挂上去的话，超时/页面跳转会把 put 一起掐掉，
+             下次冷启动还是没缓存。 */
+          e.waitUntil(caches.open(CACHE).then(c => c.put(req, cp)).catch(() => {}));
         }
         return r;
       }).catch(() => caches.match(req).then(h => h || new Response('离线', {

@@ -82,13 +82,21 @@ def strip_index(x):
     return x[m.end():] if m else x
 
 def http(method, url, data=None, headers=None, timeout=120, stdin_text=None):
-    """发送 HTTP 请求。stdin_text 走 --data-binary @-（不落临时文件）。
+    """发送 HTTP 请求，返回 (http_status, body)。网络层失败时 http_status = 0。
 
-    ★ 早先所有线程共写 /tmp/_gem.json，并发时会读到别的批次的请求体：
+    ★ stdin_text 走 --data-binary @-（不落临时文件）。
+      早先所有线程共写 /tmp/_gem.json，并发时会读到别的批次的请求体：
       轻则 JSON 截断报 400，重则把 B 批的译文写进 A 批的键下，永久污染 KV。
       现在请求体只走管道，不再有共享路径。
+
+    ★★ 返回值第一个元素必须是 **HTTP 状态码**，不是 curl 的 returncode。
+      旧实现 `return r.returncode, r.stdout` 且没加 -f/-w，等于永远返回 0：
+      401/403/429/502 全都「看起来成功」，调用方只能靠 body 是不是 JSON 猜。
+      实测代价：KV 读失败返回 {"success":false,...} 被当成译表写回，
+      1865 条译文会在下一轮被覆盖清空（详见 kv_get 的注释）。
     """
-    cmd = ['curl', '-s', '--noproxy', '*', '-m', str(timeout), '-X', method, url]
+    cmd = ['curl', '-s', '--noproxy', '*', '-m', str(timeout),
+           '-w', '\n%{http_code}', '-X', method, url]
     for k, v in (headers or {}).items():
         cmd += ['-H', '%s: %s' % (k, v)]
     if stdin_text is not None:
@@ -96,19 +104,60 @@ def http(method, url, data=None, headers=None, timeout=120, stdin_text=None):
     elif data is not None:
         cmd += ['--data-binary', '@' + data]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', input=stdin_text)
-    return r.returncode, r.stdout
+    out = r.stdout or ''
+    if r.returncode != 0:
+        return 0, out
+    # curl -w 把状态码追加在最后一行；body 本身可能含换行，必须 rsplit 一次
+    head, sep, tail = out.rstrip('\n').rpartition('\n')
+    if not sep:
+        return 0, out
+    try:
+        return int(tail.strip()), head
+    except ValueError:
+        return 0, out
+
+class KvUnavailable(RuntimeError):
+    """KV 读失败（非 404）。绝不能让调用方把它当成「译表是空的」。"""
+
 
 def kv_get(key):
+    """读 KV。返回 dict；key 不存在返回 None；其它任何异常抛 KvUnavailable。
+
+    ★★ 这是整个项目最危险的一处：main() 里写的是 `table = kv_get('tr.json') or {}`。
+      只要 kv_get 在「读不到」时返回 None，table 就变成 {}，
+      随后本轮翻译出的几十条会作为**整份译表**写回 KV —— 1865 条历史译文一次清空。
+
+      旧实现的三种失败路径全部踩这个坑：
+        ① curl 网络失败（旧 http() 返回 returncode，永远 0，看不出失败）
+        ② HTTP 502/500 返回 HTML → json.loads 抛异常 → None
+        ③ HTTP 401/403/429 返回 {"success":false,"errors":[...]} → json.loads 成功、
+           字典 truthy → 直接当译表用，错误字段混进 tr.json 写回线上
+      实测：无效 token 时 API 返回 401 + 上述 JSON 形态，旧代码会把它当表。
+
+      现在：404（key 真的不存在，首次运行）才返回 None；其余一律抛异常让任务失败。
+      失败是可见的，清空是不可见的 —— 宁可当天不翻译，也不能丢掉已有的表。
+    """
     code, out = http('GET',
                      'https://api.cloudflare.com/client/v4/accounts/%s/storage/kv/namespaces/%s/values/%s'
                      % (CF_ACC, KV_ID, key),
                      headers={'Authorization': 'Bearer ' + CF_TOK})
-    if code != 0:
+    if code == 404:
         return None
+    if code != 200:
+        raise KvUnavailable('KV GET %s 失败：HTTP %s %s' % (key, code, out[:200]))
     try:
-        return json.loads(out)
-    except Exception:
-        return None
+        obj = json.loads(out)
+    except Exception as e:
+        raise KvUnavailable('KV GET %s 返回非 JSON（HTTP %s）：%s' % (key, code, out[:200]))
+    # 结构自检：译表必须是「字符串 → 字符串」的扁平字典。
+    # 任何别的形态（API 错误体、数组、嵌套对象）都说明拿到的不是译表。
+    if not isinstance(obj, dict):
+        raise KvUnavailable('KV GET %s 返回的不是字典：%r' % (key, type(obj).__name__))
+    if 'success' in obj and obj.get('success') is False:
+        raise KvUnavailable('KV GET %s 返回 API 错误体：%s'
+                            % (key, json.dumps(obj.get('errors'), ensure_ascii=False)[:200]))
+    return obj
+
 
 def kv_put(key, obj):
     code, out = http('PUT',
@@ -117,6 +166,8 @@ def kv_put(key, obj):
                      headers={'Authorization': 'Bearer ' + CF_TOK,
                               'Content-Type': 'application/json'},
                      stdin_text=json.dumps(obj, ensure_ascii=False, separators=(',', ':')))
+    if code != 200:
+        return False
     try:
         return json.loads(out).get('success', False)
     except Exception:
@@ -125,8 +176,8 @@ def kv_put(key, obj):
 def fetch_up(tf):
     code, out = http('GET', UP + tf + '/' + tf + '-all.json',
                      headers={'user-agent': UA}, timeout=180)
-    if code != 0 or not out.strip():
-        raise RuntimeError('%s 下载失败 rc=%d' % (tf, code))
+    if code != 200 or not out.strip():
+        raise RuntimeError('%s 下载失败 HTTP=%s' % (tf, code))
     return json.loads(out)
 
 def collect():
@@ -168,7 +219,11 @@ def gemini_translate(batch, key):
                    % (model, key))
             code, out = http('POST', url, headers={'Content-Type': 'application/json'},
                              timeout=180, stdin_text=payload)
-            if code != 0 or not out.strip():
+            if code != 200 or not out.strip():
+                # 429/5xx 也要看清：旧实现 `code != 0` 恒假，靠 body 里找 "429" 猜
+                if code == 429:
+                    saw_rate = True
+                    break
                 continue
             try:
                 d = json.loads(out)
@@ -182,7 +237,9 @@ def gemini_translate(batch, key):
                 continue             # 503 / 500 / 模型不可用 → 试下一个模型
             try:
                 cand = d['candidates'][0]
-                txt = cand['content']['parts'][0]['text']
+                parts_all = cand['content']['parts']
+                # 推理模型会额外返回 thought 块（带 thought:true）；拼进去会污染译文。
+                txt = ''.join(p.get('text', '') for p in parts_all if not p.get('thought'))
             except Exception:
                 continue
             parts = [strip_index(x.strip()).strip() for x in txt.split(SPLIT)]
@@ -209,17 +266,31 @@ def main():
     log('    待译语料 %d 条 / %d 字符' % (len(texts), sum(len(t) for t in texts)))
 
     log('2/5 读取现有译表')
-    table = kv_get('tr.json') or {}
-    log('    已有 %d 条' % len(table))
+    try:
+        table = kv_get('tr.json')
+    except KvUnavailable as e:
+        # 读不到就立刻失败：绝不能当成空表继续，否则本轮写回会清空历史译文
+        log('✗ %s' % e)
+        log('✗ 中止：读不到现有译表时写回会覆盖掉全部历史译文')
+        return 1
+    if table is None:
+        log('    KV 里还没有 tr.json（首次运行），从空表开始')
+        table = {}
+    before = len(table)
+    log('    已有 %d 条' % before)
 
     # 清理历史脏数据：早期版本没剥序号前缀，会把「1. 原文」当成译文写进 KV。
     # 这些条目的值剥掉序号后与原文一致，等于没翻，删掉让它们下一轮重翻。
     dirty = [k for k, v in table.items()
              if isinstance(v, str) and v.strip() != k.strip() and strip_index(v).strip() == k.strip()]
+    # 第二类：值带序号前缀，但原文本身就是中文（is_zh 为真 → 永远进不了 todo，
+    # 只会一直留在表里当错误译文，前端「看中文」显示「3. 基于 Selkies…」）。
+    dirty += [k for k, v in table.items()
+              if k not in dirty and isinstance(v, str) and INDEX_PREFIX.match(v) and is_zh(k)]
     for k in dirty:
         del table[k]
     if dirty:
-        log('    清理「序号前缀 + 原文」的无效译文 %d 条' % len(dirty))
+        log('    清理无效译文 %d 条（序号前缀 / 原文已是中文）' % len(dirty))
 
     todo = [t for t in texts if t not in table]
     log('3/5 新增 %d 条' % len(todo))
@@ -255,52 +326,66 @@ def main():
     fails = [0]
     lock = threading.Lock()
     stop = threading.Event()
+    # ★ pending = 尚未处理完的批次数（排队中 + 正在跑）。
+    #   旧实现用 q.get_nowait()，队列一空线程就 return；而「对不齐 → 对半拆开
+    #   重新入队」发生在别的线程已经退出之后，于是拆分出来的两半只能靠最后一个
+    #   线程串行善后，若它再撞 5 次限流，剩余批次直接丢弃且不报错。
+    pending = [len(batches)]
 
     def worker(idx):
         k = GEMINI_KEYS[idx]
         while not stop.is_set():
+            with lock:
+                if pending[0] <= 0:
+                    return
             try:
-                batch = q.get_nowait()
+                batch = q.get(timeout=1)
             except queue.Empty:
-                return
-            rate = 0
-            while True:
-                res = gemini_translate(batch, k)
-                if res == 'RATE':
-                    rate += 1
-                    if rate > MAX_RATE_RETRY:
-                        with lock:
-                            fails[0] += 1
-                        log('    key#%d 连续限流 %d 次，放弃该批（%d 条）'
-                            % (idx + 1, rate, len(batch)))
+                continue
+            try:
+                rate = 0
+                while True:
+                    res = gemini_translate(batch, k)
+                    if res == 'RATE':
+                        rate += 1
+                        if rate > MAX_RATE_RETRY:
+                            with lock:
+                                fails[0] += 1
+                            log('    key#%d 连续限流 %d 次，放弃该批（%d 条）'
+                                % (idx + 1, rate, len(batch)))
+                            break
+                        wait = min(20 * rate, 90)
+                        log('    key#%d 限流，退避 %ds（第 %d 次）' % (idx + 1, wait, rate))
+                        time.sleep(wait)
+                        continue
+                    if not res:
+                        # 对不齐多半是批次太大被截断：对半拆开重试，最小 1 条
+                        if len(batch) > 1:
+                            mid = len(batch) // 2
+                            with lock:
+                                pending[0] += 2      # 两半重新排队
+                            q.put(batch[:mid])
+                            q.put(batch[mid:])
+                            log('    key#%d 对不齐，拆成 %d+%d 重试'
+                                % (idx + 1, mid, len(batch) - mid))
+                        else:
+                            with lock:
+                                fails[0] += 1
+                            log('    key#%d 单条失败，跳过' % (idx + 1))
                         break
-                    wait = min(20 * rate, 90)
-                    log('    key#%d 限流，退避 %ds（第 %d 次）' % (idx + 1, wait, rate))
-                    time.sleep(wait)
-                    continue
-                if not res:
-                    # 对不齐多半是批次太大被截断：对半拆开重试，最小 1 条
-                    if len(batch) > 1:
-                        mid = len(batch) // 2
-                        q.put(batch[:mid])
-                        q.put(batch[mid:])
-                        log('    key#%d 对不齐，拆成 %d+%d 重试'
-                            % (idx + 1, mid, len(batch) - mid))
-                    else:
-                        with lock:
-                            fails[0] += 1
-                        log('    key#%d 单条失败，跳过' % (idx + 1))
+                    new = 0
+                    with lock:
+                        for src, zh in zip(batch, res):
+                            zh = zh.strip()
+                            if zh and zh != src:
+                                table[src] = zh
+                                new += 1
+                        added[0] += new
+                    log('    key#%d 完成一批 +%d，累计新增 %d' % (idx + 1, new, added[0]))
                     break
-                new = 0
+            finally:
                 with lock:
-                    for src, zh in zip(batch, res):
-                        zh = zh.strip()
-                        if zh and zh != src:
-                            table[src] = zh
-                            new += 1
-                    added[0] += new
-                log('    key#%d 完成一批 +%d，累计新增 %d' % (idx + 1, new, added[0]))
-                break
+                    pending[0] -= 1
 
     with ThreadPoolExecutor(max_workers=len(GEMINI_KEYS)) as ex:
         list(ex.map(worker, range(len(GEMINI_KEYS))))

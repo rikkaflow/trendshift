@@ -40,8 +40,8 @@ assets = {
 
 tpl = (SRC / 'worker.template.js').read_text(encoding='utf-8')
 script = tpl.replace('__ASSETS__', json.dumps(assets, ensure_ascii=False))
-OUT.write_text(script, encoding='utf-8')
-print('wrote', OUT, OUT.stat().st_size, 'bytes')
+# ★ 产物在全部门禁通过后才落盘：门失败时不能留下一个「看起来可用」的旧/新产物，
+#   deploy.sh 后面的 upload_worker.py 会照单全收。
 
 # ---- 语法门：前端整段 script 必须能被 JS 解析 ----
 # 2026-11-24 事故：index.html 里同一作用域重复 `let googleDownUntil`，
@@ -68,6 +68,16 @@ if node:
         print('✗ 前端 JS 语法错误：\n' + (r.stderr or '')[:800], file=sys.stderr)
         sys.exit(1)
     print('✓ JS 语法检查通过（%d 个 script 块，%d 字符）' % (len(blocks), len(js)))
+
+    # sw.js 同样是「静默失效」高危面：语法错不会让页面白屏，
+    # 但 Service Worker 注册失败 → 离线全废、tr.json 超时保护全废，
+    # 而 build/deploy 的 HTTP 探针全都照常 200。同一道门顺手覆盖它。
+    sw_path = SRC / 'sw.js'
+    r2 = subprocess.run([node, '--check', str(sw_path)], capture_output=True, text=True)
+    if r2.returncode != 0:
+        print('✗ sw.js 语法错误：\n' + (r2.stderr or '')[:800], file=sys.stderr)
+        sys.exit(1)
+    print('✓ sw.js 语法检查通过（%d 字符）' % len(sw))
 else:
     print('! 未安装 node，跳过语法检查（部署前请手动 node --check）')
 
@@ -142,3 +152,6 @@ def check_zh_parity():
 
 
 check_zh_parity()
+
+OUT.write_text(script, encoding='utf-8')
+print('wrote', OUT, OUT.stat().st_size, 'bytes')

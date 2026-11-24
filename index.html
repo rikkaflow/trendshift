@@ -271,18 +271,42 @@ function pruneSnapshots(){
   try {
     const keys = Object.keys(localStorage).filter(k => k.startsWith('ts:last:'));
     if (keys.length <= KEEP_SNAPSHOTS) return;
-    // 按写入时间粗排：用 key 名字无法判断，直接砍掉多余的（先进先出）
-    keys.slice(0, keys.length - KEEP_SNAPSHOTS).forEach(k => localStorage.removeItem(k));
+    /* 按写入时间淘汰，而不是按 key 顺序：localStorage 的键序规范上不保证是写入顺序
+       （Chrome 是插入序，但这不是契约），拿它当 LRU 可能把刚缓存的常用栏目删掉。
+       每个快照自带 ts 字段（saveSnap 写入），没有 ts 的老快照按 0 处理优先淘汰。 */
+    const withTs = keys.map(k => {
+      let t = 0;
+      try { t = (JSON.parse(localStorage.getItem(k)) || {}).ts || 0; } catch(e) {}
+      return { k, t };
+    }).sort((a, b) => a.t - b.t);
+    withTs.slice(0, withTs.length - KEEP_SNAPSHOTS).forEach(x => localStorage.removeItem(x.k));
   } catch(e) {}
 }
 
+/* 快照键：栏目 + 语言 + 内容维度（搜索词 / 主题 slug / 统计年月）。
+   同一条栏目下的不同内容必须是不同的键，否则会互相覆盖（见 refresh 里的注释）。 */
+function snapKey(s){
+  let k = 'ts:last:' + s.tf + ':' + (s.lang || '');
+  if (s.q) k += ':q=' + s.q;
+  else if (s.tf === 'topics' && s.topicSlug) k += ':topic=' + s.topicSlug;
+  else if (s.tf === 'stats') k += ':ym=' + (st.statYear || '') + '-' + (st.statMonth || '');
+  return k;
+}
+
 /* gh:* 从不清理会慢慢撑爆 5MB 配额，最终 save 兜底把 ts:last 全删光。
-   按写入顺序保留最近 80 个。 */
+   按写入时间保留最近 80 个 —— 每条都存了 {t, v}，直接读 t 排序；
+   旧实现按 Object.keys() 顺序 slice，而 localStorage 键序规范上不保证是写入顺序，
+   可能把刚缓存的常用仓库先删掉。 */
 function pruneGh(){
   try {
     const keys = Object.keys(localStorage).filter(k => k.startsWith('gh:'));
     if (keys.length <= KEEP_GH) return;
-    keys.slice(0, keys.length - KEEP_GH).forEach(k => localStorage.removeItem(k));
+    const withTs = keys.map(k => {
+      let t = 0;
+      try { t = (JSON.parse(localStorage.getItem(k)) || {}).t || 0; } catch(e) {}
+      return { k, t };
+    }).sort((a, b) => a.t - b.t);
+    withTs.slice(0, withTs.length - KEEP_GH).forEach(x => localStorage.removeItem(x.k));
   } catch(e) {}
 }
 
@@ -290,6 +314,8 @@ const save = (key, val) => {
   try {
     if (key.startsWith('ts:last:')) pruneSnapshots();
     else if (key.startsWith('gh:')) pruneGh();
+    /* 快照打上写入时间：pruneSnapshots 靠它做 LRU 淘汰（不能靠 localStorage 键序） */
+    if (key.startsWith('ts:last:') && val && typeof val === 'object' && !val.ts) val.ts = Date.now();
     localStorage.setItem(key, JSON.stringify(val));
   } catch(e) {
     // 配额满了：清掉快照再试一次
@@ -476,12 +502,19 @@ async function viaWorkerGroq(texts){
   return d.zh;
 }
 
-/* 按字符预算打包，避免长文本一批就爆 token */
+/* 按字符预算打包，避免长文本一批就爆 token。
+   ★ 同时受 TR_MAX_ITEMS(40) 约束：Worker 只翻前 40 条，超出部分留空槽，
+     而前端用 d.zh.length === texts.length 校验对齐 —— 旧实现只按字符切，
+     主题栏目 64 个标签总共才 767 字符 → 一包 64 条 → 长度不符 → 整批熔断 2 分钟。
+     实测：主题页 64 个标签只译出 19 个，其余长期停在英文。 */
+const TR_MAX_ITEMS = 40;
 function packBatches(texts, budget){
   const out = [];
   let cur = [], size = 0;
   for (const t of texts) {
-    if (cur.length && size + t.length > budget) { out.push(cur); cur = []; size = 0; }
+    if (cur.length && (size + t.length > budget || cur.length >= TR_MAX_ITEMS)) {
+      out.push(cur); cur = []; size = 0;
+    }
     cur.push(t); size += t.length;
   }
   if (cur.length) out.push(cur);
@@ -908,10 +941,14 @@ async function refresh(force){
     }
     // 慢请求返回时用户可能已切栏目：丢弃，且不能写进别的栏目的缓存
     if (token !== st.refreshToken) return;
-    save('ts:last:' + snap.tf + ':' + snap.lang, st.data);
+    /* ★ 快照键必须区分「同一栏目下的不同内容」：搜索词、主题二级页、统计月份。
+       旧键只有 tf:lang，于是「在 weekly 里搜一次关键字」会把 weekly 的离线快照
+       覆盖成搜索结果；断网再进 weekly 看到的是上次搜索的结果。
+       主题二级页同理（全部主题 vs 某个主题是两份完全不同的内容）。 */
+    save(snapKey(snap), st.data);
   } catch (e) {
     if (token !== st.refreshToken) return;
-    const cached = read('ts:last:' + snap.tf + ':' + snap.lang);
+    const cached = read(snapKey(snap));
     if (cached && !cached.error) {
       st.data = cached;
       // 离线恢复必须同步重建分页，否则 renderBoard 只看到空 pages 就停在骨架屏
@@ -988,24 +1025,42 @@ function loadTrCache(){
    这是主通道；本地缓存只是补最近新出现、表里还没有的文本。
    云端表优先（质量高、每天更新），本地独有的条目保留。 */
 let trTableLoaded = false;
+/* ★ trTableReady 是「表已就位（或已判定拿不到）」的 Promise。
+   ★★ 旧实现把 trTableLoaded 在 await 之前同步置 true，而 loadTrTable() 与
+      refresh() 是并行发起的：api/list(14 KB) 几乎必然先于 tr.json(390 KB) 返回，
+      refresh() 渲染完立刻调 translateView()，此时表还没到、trTableLoaded 却已是 true，
+      translateView 查 st.tr 全 miss → 首屏 25 条全部发往 /api/tr（白耗 Gemini 额度），
+      结果还会写进 localStorage['ts:trcache'] 占配额。
+      现在：首屏渲染不等待它（秒出英文），但 translateView 收集待译文本前先等它，
+      最多等 6 秒（弱网下宁可走实时翻译，也不能让首屏一直空白）。 */
+let trTableReady = null;
 async function loadTrTable(){
-  if (trTableLoaded) return;
+  if (trTableReady) return trTableReady;
   trTableLoaded = true;
-  try {
-    const r = await fetchWithTimeout('tr.json', 20000);
-    if (!r.ok) throw new Error('tr ' + r.status);
-    const table = await r.json();
-    if (table && typeof table === 'object') {
-      st.tr = Object.assign({}, st.trLocal || {}, table);
-      /* 表晚于首屏到达：原地替换文本节点，不重建 DOM。
-         首屏因此不用等一个完整 RTT（弱网下这就是白屏和立刻出内容的差别）。 */
-      if (st.data) applyTranslations();
-      translateView();
+  trTableReady = (async () => {
+    try {
+      const r = await fetchWithTimeout('tr.json', 20000);
+      if (!r.ok) throw new Error('tr ' + r.status);
+      const table = await r.json();
+      if (table && typeof table === 'object') {
+        st.tr = Object.assign({}, st.trLocal || {}, table);
+        /* 表晚于首屏到达：原地替换文本节点，不重建 DOM。
+           首屏因此不用等一个完整 RTT（弱网下这就是白屏和立刻出内容的差别）。 */
+        if (st.data) applyTranslations();
+        /* 表已就位后补跑一次：首屏渲染时表还没到，那些文本当时没能查表。
+           用 setTimeout 而不是直接调，避免在 trTableReady 自身执行期间 await 它。 */
+        setTimeout(() => { try { translateView(); } catch(e) {} }, 0);
+        return true;
+      }
+    } catch(e) {
+      /* 表拿不到就退回实时翻译，功能不中断 */
+      trTableLoaded = false;
+      trTableReady = null;   // 允许下次重试
+      return false;
     }
-  } catch(e) {
-    /* 表拿不到就退回实时翻译，功能不中断 */
-    trTableLoaded = false;
-  }
+    return false;
+  })();
+  return trTableReady;
 }
 
 /* 只翻首屏（前 12 条）：全量翻译长文本要等十几秒，滚动时再补 */
@@ -1023,6 +1078,11 @@ async function translateView(){
   try {
     do {
       trDirty = false;
+      /* ★ 先等静态译表就位（最多 6 秒）：表里的条目根本不该走实时通道。
+         表已经加载过就立即返回，无额外延迟。 */
+      if (trTableReady) {
+        await Promise.race([trTableReady, new Promise(r => setTimeout(r, 6000))]);
+      }
       /* 译表覆盖绝大多数文本，实时通道只补新出现的少数几条。
          轮次从 12 降到 4，避免表外文本把界面卡住几十秒。 */
       for (let round = 0; round < 4; round++) {
@@ -1112,6 +1172,10 @@ async function renderRepo(name){
   const g = gh.ok ? gh : {};
   const descEn = lt.d || g.description || '';   // 未上榜/旧项目靠 GitHub 简介兜底
   let descZh = st.zh ? (st.tr || {})[descEn] : '';
+  /* 原文本来就是中文（或纯专有名词）时不该出现「正在翻译…」和切换按钮：
+     旧实现无条件渲染它们，translateBatch 又会跳过这类文本（todo 为空 → 返回 {}），
+     于是详情页先显示「正在翻译…」，随即变「原文」，点「看中文」直接报「翻译失败」。 */
+  const needTr = needsTranslation(descEn);
   const series = repo.series || [];
   const lang = lt.l || g.language || '';
   const stars = g.stars != null ? g.stars : lt.s;
@@ -1145,8 +1209,8 @@ async function renderRepo(name){
       (repo.best ? '<span class="chip">最好 #' + repo.best + '</span>' : '') +
     '</div>' +
     (descEn ? '<div class="d-desc" id="ddesc">' + esc(descZh || descEn) + '</div>' +
-      '<div class="tr-note"><span>' + (descZh ? '机器翻译' : (st.zh ? '正在翻译…' : '原文')) + '</span>' +
-      '<button id="trtoggle">' + (descZh || st.zh ? '看原文' : '看中文') + '</button></div>' : '') +
+      (needTr ? '<div class="tr-note"><span>' + (descZh ? '机器翻译' : (st.zh ? '正在翻译…' : '原文')) + '</span>' +
+      '<button id="trtoggle">' + (descZh || st.zh ? '看原文' : '看中文') + '</button></div>' : '') : '') +
 
     '<div class="grid4">' +
       '<div class="cell"><b>' + k(stars) + '</b><span>Stars</span></div>' +
@@ -1185,7 +1249,7 @@ async function renderRepo(name){
   };
 
   // 没有现成译文时自动翻译一次，避免停在「正在翻译…」假死
-  if (!descZh && st.zh && descEn) {
+  if (!descZh && st.zh && descEn && needTr) {
     /* 拿不到译文时的回落：原文本来就是中文 / 被「纯专有名词」判据跳过 /
        翻译通道熔断。三种情况下都不能让界面永远停在「正在翻译…」，
        按钮也必须回到可点的「看中文」（旧实现直接 return，界面卡死且文案是反的）。 */
@@ -1315,10 +1379,33 @@ function bindControls(){
     if (b.dataset.tf === st.tf && !(b.dataset.tf === 'topics' && st.topicSlug)) return;         // 点当前标签不重复加载
     st.tf = b.dataset.tf; st.period = null; st.q = ''; $('#q').value = ''; st.topicSlug = null;
     st.pendingState = null;
-    // 切栏目等于回到列表根，清掉残留的 hash/state，否则后续返回会跳回旧视图
-    if (location.hash) {
-      try { history.replaceState(null, '', location.pathname + location.search); } catch(e) {}
+    /* 切栏目等于回到列表根，历史栈也必须回到「[根 A][守卫 G]」这个形状：
+       旧实现 replaceState(null) 只是把当前条目抹成空根，栈变成
+       [A][G][空根] → 第一次返回落到 G（静默无提示）、第二次才落到 A（提示），
+       用户要连按三次才退出。
+       正确做法分两种情形：
+         ① 当前在视图里（state.v 非空）：先把自己改写成「无状态根」再 back，
+            吃掉视图那一层，落回上一层的守卫 G → 栈恢复 [A][G]；
+         ② 当前已在根/守卫上：直接改写成守卫条目，保证 guard 标记不丢。 */
+    const cur = history.state || {};
+    if (cur.v) {
+      const depth = cur._d || 1;
+      try { history.replaceState({ v: null, _d: depth }, '', location.pathname + location.search); } catch(e) {}
+      history.back();
+    } else if (location.hash) {
+      const depth = cur._d || 1;
+      try {
+        history.replaceState({ v: null, _d: depth, guard: 1 },
+                             '', location.pathname + location.search);
+        onGuard = true;
+      } catch(e) {
+        try { history.replaceState(null, '', location.pathname + location.search); } catch(e2) {}
+      }
     }
+    /* 现在渲染的是列表根，不是视图：不置 false 的话 popstate 会把这次返回
+       当成「从视图返回」，再补一条守卫，返回计数继续错乱。 */
+    curView = false;
+    hideExitHint();
     resetPaging();
     buildControls();
     if (BOARD.has(st.tf)) loadLangs();
@@ -1636,12 +1723,31 @@ function renderState(state){
   if (state.v === 'topic') {
     /* 该栏目可能已在排序面板里被隐藏：不能再进二级页，
        否则「完成」的 back 会把用户带回刚隐藏的栏目。
-       同时把 URL 里的 #topic=... 清掉，避免刷新后再次落到隐藏栏目。 */
+       同时把 URL 里的 #topic=... 清掉，避免刷新后再次落到隐藏栏目。
+       ★ 降级后渲染的是列表根，所以必须同时 ①curView=false ②把当前条目
+       改写成守卫（保留 _d），否则 popstate 会把下一次返回当成「从视图返回」，
+       静默补一条守卫，用户要连按三次才退出。 */
     if (st.hidden && st.hidden.has('topics')) {
+      const depth = (history.state && history.state._d) || 1;
+      if (depth > 1) {
+        /* 正常情况：这条 topic 记录压在守卫之上，back 一层就回到 [A][G]。
+           同时把本条改写成无状态根，避免 back 过程中被当成视图重复渲染。 */
+        try { history.replaceState({ v: null, _d: depth - 1 }, '', location.pathname + location.search); } catch(e) {}
+        curView = false;
+        hideExitHint();
+        history.back();
+        return;
+      }
+      /* 冷启动直达 #topic（栈底就是这条）：不能 back，原地改写成守卫。 */
       try {
-        history.replaceState({ v: null, _d: (history.state && history.state._d) || 1 },
+        history.replaceState({ v: null, _d: 1, guard: 1 },
                              '', location.pathname + location.search);
-      } catch(e) {}
+        onGuard = true;
+      } catch(e) {
+        try { history.replaceState({ v: null, _d: 1 }, '', location.pathname + location.search); } catch(e2) {}
+      }
+      curView = false;
+      hideExitHint();
       renderState(null);
       return;
     }
