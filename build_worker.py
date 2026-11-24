@@ -42,3 +42,41 @@ tpl = (SRC / 'worker.template.js').read_text(encoding='utf-8')
 script = tpl.replace('__ASSETS__', json.dumps(assets, ensure_ascii=False))
 OUT.write_text(script, encoding='utf-8')
 print('wrote', OUT, OUT.stat().st_size, 'bytes')
+
+# ---- 语法门：前端整段 script 必须能被 JS 解析 ----
+# 2026-11-24 事故：index.html 里同一作用域重复 `let googleDownUntil`，
+# SyntaxError 让整个脚本不执行，页面只剩骨架且列表永远空白，
+# 而构建/部署/接口验证全部通过——静态资源能返回 ≠ 前端能运行。
+# 这里在构建期做一次解析 + 顶层重复声明检查，把这类错误挡在部署之前。
+import re
+import shutil
+import subprocess
+import sys
+
+blocks = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.S)
+if not blocks:
+    print('✗ index.html 里没找到内联 script，检查模板是否被改坏', file=sys.stderr)
+    sys.exit(1)
+js = '\n'.join(blocks)
+check = pathlib.Path('/tmp/_ts_check.js')
+check.write_text(js, encoding='utf-8')
+
+node = shutil.which('node')
+if node:
+    r = subprocess.run([node, '--check', str(check)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print('✗ 前端 JS 语法错误：\n' + (r.stderr or '')[:800], file=sys.stderr)
+        sys.exit(1)
+    print('✓ JS 语法检查通过（%d 个 script 块，%d 字符）' % (len(blocks), len(js)))
+else:
+    print('! 未安装 node，跳过语法检查（部署前请手动 node --check）')
+
+# 顶层重复声明：同一个 let/const/var 名字出现两次以上即为 SyntaxError 隐患
+seen = {}
+for name in re.findall(r'^(?:let|const|var)\s+([A-Za-z_$][\w$]*)', js, re.M):
+    seen[name] = seen.get(name, 0) + 1
+dups = {k: v for k, v in seen.items() if v > 1}
+if dups:
+    print('✗ 顶层重复声明（会导致 SyntaxError）：%s' % dups, file=sys.stderr)
+    sys.exit(1)
+print('✓ 无顶层重复声明')
