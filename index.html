@@ -476,12 +476,19 @@ async function viaWorkerGroq(texts){
   return d.zh;
 }
 
-/* 按字符预算打包，避免长文本一批就爆 token */
+/* 按字符预算打包，避免长文本一批就爆 token。
+   ★ 同时受 TR_MAX_ITEMS(40) 约束：Worker 只翻前 40 条，超出部分留空槽，
+     而前端用 d.zh.length === texts.length 校验对齐 —— 旧实现只按字符切，
+     主题栏目 64 个标签总共才 767 字符 → 一包 64 条 → 长度不符 → 整批熔断 2 分钟。
+     实测：主题页 64 个标签只译出 19 个，其余长期停在英文。 */
+const TR_MAX_ITEMS = 40;
 function packBatches(texts, budget){
   const out = [];
   let cur = [], size = 0;
   for (const t of texts) {
-    if (cur.length && size + t.length > budget) { out.push(cur); cur = []; size = 0; }
+    if (cur.length && (size + t.length > budget || cur.length >= TR_MAX_ITEMS)) {
+      out.push(cur); cur = []; size = 0;
+    }
     cur.push(t); size += t.length;
   }
   if (cur.length) out.push(cur);
@@ -988,24 +995,42 @@ function loadTrCache(){
    这是主通道；本地缓存只是补最近新出现、表里还没有的文本。
    云端表优先（质量高、每天更新），本地独有的条目保留。 */
 let trTableLoaded = false;
+/* ★ trTableReady 是「表已就位（或已判定拿不到）」的 Promise。
+   ★★ 旧实现把 trTableLoaded 在 await 之前同步置 true，而 loadTrTable() 与
+      refresh() 是并行发起的：api/list(14 KB) 几乎必然先于 tr.json(390 KB) 返回，
+      refresh() 渲染完立刻调 translateView()，此时表还没到、trTableLoaded 却已是 true，
+      translateView 查 st.tr 全 miss → 首屏 25 条全部发往 /api/tr（白耗 Gemini 额度），
+      结果还会写进 localStorage['ts:trcache'] 占配额。
+      现在：首屏渲染不等待它（秒出英文），但 translateView 收集待译文本前先等它，
+      最多等 6 秒（弱网下宁可走实时翻译，也不能让首屏一直空白）。 */
+let trTableReady = null;
 async function loadTrTable(){
-  if (trTableLoaded) return;
+  if (trTableReady) return trTableReady;
   trTableLoaded = true;
-  try {
-    const r = await fetchWithTimeout('tr.json', 20000);
-    if (!r.ok) throw new Error('tr ' + r.status);
-    const table = await r.json();
-    if (table && typeof table === 'object') {
-      st.tr = Object.assign({}, st.trLocal || {}, table);
-      /* 表晚于首屏到达：原地替换文本节点，不重建 DOM。
-         首屏因此不用等一个完整 RTT（弱网下这就是白屏和立刻出内容的差别）。 */
-      if (st.data) applyTranslations();
-      translateView();
+  trTableReady = (async () => {
+    try {
+      const r = await fetchWithTimeout('tr.json', 20000);
+      if (!r.ok) throw new Error('tr ' + r.status);
+      const table = await r.json();
+      if (table && typeof table === 'object') {
+        st.tr = Object.assign({}, st.trLocal || {}, table);
+        /* 表晚于首屏到达：原地替换文本节点，不重建 DOM。
+           首屏因此不用等一个完整 RTT（弱网下这就是白屏和立刻出内容的差别）。 */
+        if (st.data) applyTranslations();
+        /* 表已就位后补跑一次：首屏渲染时表还没到，那些文本当时没能查表。
+           用 setTimeout 而不是直接调，避免在 trTableReady 自身执行期间 await 它。 */
+        setTimeout(() => { try { translateView(); } catch(e) {} }, 0);
+        return true;
+      }
+    } catch(e) {
+      /* 表拿不到就退回实时翻译，功能不中断 */
+      trTableLoaded = false;
+      trTableReady = null;   // 允许下次重试
+      return false;
     }
-  } catch(e) {
-    /* 表拿不到就退回实时翻译，功能不中断 */
-    trTableLoaded = false;
-  }
+    return false;
+  })();
+  return trTableReady;
 }
 
 /* 只翻首屏（前 12 条）：全量翻译长文本要等十几秒，滚动时再补 */
@@ -1023,6 +1048,11 @@ async function translateView(){
   try {
     do {
       trDirty = false;
+      /* ★ 先等静态译表就位（最多 6 秒）：表里的条目根本不该走实时通道。
+         表已经加载过就立即返回，无额外延迟。 */
+      if (trTableReady) {
+        await Promise.race([trTableReady, new Promise(r => setTimeout(r, 6000))]);
+      }
       /* 译表覆盖绝大多数文本，实时通道只补新出现的少数几条。
          轮次从 12 降到 4，避免表外文本把界面卡住几十秒。 */
       for (let round = 0; round < 4; round++) {
@@ -1112,6 +1142,10 @@ async function renderRepo(name){
   const g = gh.ok ? gh : {};
   const descEn = lt.d || g.description || '';   // 未上榜/旧项目靠 GitHub 简介兜底
   let descZh = st.zh ? (st.tr || {})[descEn] : '';
+  /* 原文本来就是中文（或纯专有名词）时不该出现「正在翻译…」和切换按钮：
+     旧实现无条件渲染它们，translateBatch 又会跳过这类文本（todo 为空 → 返回 {}），
+     于是详情页先显示「正在翻译…」，随即变「原文」，点「看中文」直接报「翻译失败」。 */
+  const needTr = needsTranslation(descEn);
   const series = repo.series || [];
   const lang = lt.l || g.language || '';
   const stars = g.stars != null ? g.stars : lt.s;
@@ -1145,8 +1179,8 @@ async function renderRepo(name){
       (repo.best ? '<span class="chip">最好 #' + repo.best + '</span>' : '') +
     '</div>' +
     (descEn ? '<div class="d-desc" id="ddesc">' + esc(descZh || descEn) + '</div>' +
-      '<div class="tr-note"><span>' + (descZh ? '机器翻译' : (st.zh ? '正在翻译…' : '原文')) + '</span>' +
-      '<button id="trtoggle">' + (descZh || st.zh ? '看原文' : '看中文') + '</button></div>' : '') +
+      (needTr ? '<div class="tr-note"><span>' + (descZh ? '机器翻译' : (st.zh ? '正在翻译…' : '原文')) + '</span>' +
+      '<button id="trtoggle">' + (descZh || st.zh ? '看原文' : '看中文') + '</button></div>' : '') : '') +
 
     '<div class="grid4">' +
       '<div class="cell"><b>' + k(stars) + '</b><span>Stars</span></div>' +
@@ -1185,7 +1219,7 @@ async function renderRepo(name){
   };
 
   // 没有现成译文时自动翻译一次，避免停在「正在翻译…」假死
-  if (!descZh && st.zh && descEn) {
+  if (!descZh && st.zh && descEn && needTr) {
     /* 拿不到译文时的回落：原文本来就是中文 / 被「纯专有名词」判据跳过 /
        翻译通道熔断。三种情况下都不能让界面永远停在「正在翻译…」，
        按钮也必须回到可点的「看中文」（旧实现直接 return，界面卡死且文案是反的）。 */

@@ -1857,11 +1857,6 @@
 "🪅 Windows & Linux userspace emulator":"🪅 Windows 与 Linux 用户空间模拟器",
 "🪐 Markdown with superpowers: from ideas to papers, presentations, websites, books, and knowledge bases.":"🪐 拥有超能力的 Markdown：从想法到论文、演示文稿、网站、书籍和知识库。",
 "🪓 An orchestration engine for background tasks, AI agents, and durable workflows":"🪓 面向后台任务、AI 代理和持久工作流的编排引擎",
-"LLM 驱动的多市场股票智能分析系统：多源行情、实时新闻、决策看板与自动推送，支持零成本定时运行。  LLM-powered multi-market stock analysis system with multi-source market data, real-time news, decision dashboard, automated notifications, and cost-free scheduled runs.":"7. LLM 驱动的多市场股票智能分析系统：多源行情、实时新闻、决策看板与自动推送，支持零成本定时运行。",
-"Langchain-Chatchat（原Langchain-ChatGLM）基于 Langchain 与 ChatGLM, Qwen 与 Llama 等语言模型的 RAG 与 Agent 应用 | Langchain-Chatchat (formerly langchain-ChatGLM), local knowledge based LLM (like ChatGLM, Qwen and Llama) RAG and Agent app with langchain":"8. Langchain-Chatchat（原Langchain-ChatGLM）基于 Langchain 与 ChatGLM, Qwen 与 Llama 等语言模型的 RAG 与 Agent 应用",
 "SF64 PC Port":"SF64 PC 移植版",
-"Vue3 + Pinia 仿抖音，Vue 在移动端的最佳实践 .  Imitate TikTok ，Vue Best practices on Mobile":"Vue3 + Pinia 仿抖音，Vue 在移动端的最佳实践 .  模仿 TikTok，Vue 移动端最佳实践",
-"基于Selkies的Linux网页版微信/QQ/Telegram，支持本地中文输入法，支持三方应用，支持AMD64和ARM64。":"3. 基于 Selkies 的 Linux 网页版微信/QQ/Telegram，支持本地中文输入法，支持三方应用，支持 AMD64 和 ARM64。",
-"基于Vue3 + WebRTC + Nodejs + Flutter搭建的远程桌面控制、游戏串流":"4. 基于 Vue3 + WebRTC + Nodejs + Flutter 搭建的远程桌面控制、游戏串流",
-"自动化上传视频到社交媒体：抖音、小红书、视频号、tiktok、youtube、bilibili":"6. 自动化上传视频到社交媒体：抖音、小红书、视频号、TikTok、YouTube、Bilibili"
+"Vue3 + Pinia 仿抖音，Vue 在移动端的最佳实践 .  Imitate TikTok ，Vue Best practices on Mobile":"Vue3 + Pinia 仿抖音，Vue 在移动端的最佳实践 .  模仿 TikTok，Vue 移动端最佳实践"
 }

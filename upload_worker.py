@@ -60,6 +60,12 @@ def main():
         '--data-binary', '@/tmp/_up.bin',
     ], capture_output=True, text=True)
 
+    # ★ 先看 curl 自己有没有跑成功：网络断/超时/证书问题时 stdout 是空的，
+    #   直接 json.loads 只会抛异常，原始错误信息就丢了。
+    if r.returncode != 0:
+        print('上传请求失败：curl rc=%s %s' % (r.returncode, (r.stderr or '').strip()[:300]))
+        return 1
+
     try:
         d = json.loads(r.stdout)
     except Exception:

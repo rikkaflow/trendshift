@@ -33,7 +33,14 @@ python3 upload_worker.py
 
 echo "→ 验证"
 sleep 2
-B=https://trendshift-lite.logos7313.workers.dev
+# ★ 域名默认值与 upload_worker.py 的 WORKER_NAME 联动：WORKER_NAME=foo 时
+#   默认访问 https://foo.<subdomain>.workers.dev，不再写死 trendshift-lite。
+#   有自定义域/换账号时用 WORKER_BASE 显式覆盖。
+if [ -n "$WORKER_BASE" ]; then
+  B="$WORKER_BASE"
+else
+  B="https://${WORKER_NAME:-trendshift-lite}.${WORKERS_SUBDOMAIN:-logos7313}.workers.dev"
+fi
 # -sf：HTTP 非 2xx 直接失败，避免 Worker 报错时脚本仍打印「完成」
 if ! curl -sf --noproxy '*' -m 25 "$B/health" -o /tmp/_h.json; then
   echo "✗ /health 检查失败" >&2; exit 1

@@ -111,6 +111,14 @@ function trSet(k, text, ttl) {
 }
 
 function buildData(rows) {
+  /* ★ 简介首尾空白必须在这里统一剥掉（唯一入口）。
+     cloud_sync.py 入库时用 `description.strip()` 当 key，而 Worker/前端直接用
+     原始字符串查表 → 原文末尾带空格/换行的条目**永远 miss 译表**，每次刷新都
+     重新走 /api/tr 实时翻译（白耗 Gemini 额度），界面也一直是英文。
+     实测上游 4920 条简介里有 59 条带首尾空白，其中 58 条的 trim 版本在表里。 */
+  for (const e of rows) {
+    if (typeof e.description === 'string') e.description = e.description.trim();
+  }
   const g = groupBy(rows);
   const periods = [...g.keys()].sort().reverse();
   return { t: Date.now(), rows, g, periods, langs: langCatalog(rows) };
@@ -257,7 +265,14 @@ async function tsJson(path, ctx, ttl = 3600) {
       cf: { cacheTtl: ttl, cacheEverything: true },
     });
     if (!r.ok) throw new Error('ts ' + path + ' ' + r.status);
-    return await r.text();
+    const body = await r.text();
+    /* 200 不等于内容是 JSON：Cloudflare 质询页 / 维护页都是 text/html + 200。
+       rscText 已经防了这一手，tsJson 也必须防 —— 否则非法 JSON 会被写进
+       memText 与 caches.default 各 6 小时，调用方 res.json() 抛错 → /api/stats 恒 502。 */
+    try { JSON.parse(body); } catch (e) {
+      throw new Error('ts ' + path + ' 非 JSON（' + (r.headers.get('content-type') || '?') + '）');
+    }
+    return body;
   }, ctx);
   const text = await res.text();
   memSet(mk, text, ttl);
@@ -284,7 +299,14 @@ async function mentions(ctx) {
       cf: { cacheTtl: 300, cacheEverything: true },
     });
     if (!r.ok) throw new Error('mentions ' + r.status);
-    const rows = await r.json();
+    /* 同 tsJson：200 也可能是 HTML 质询页，r.json() 抛错会让 /api/mentions 恒 502，
+       而「热议」是首页可见栏目。先按文本取再校验。 */
+    const body = await r.text();
+    let rows;
+    try { rows = JSON.parse(body); } catch (e) {
+      throw new Error('mentions 非 JSON（' + (r.headers.get('content-type') || '?') + '）');
+    }
+    if (!Array.isArray(rows)) throw new Error('mentions 不是数组');
     return {
       items: rows.map(x => ({
         id: x.id, plat: x.platform, repo: x.repository_full_name,
@@ -462,14 +484,16 @@ async function api(url, ctx, env, request) {
     }
     /* ★ 返回数组长度必须与请求条数严格相等：前端用 d.zh.length === texts.length
        校验对齐，少一个槽就会整批判为失败并熔断 15~60 秒。
-       所以超限的条目只能留空槽，不能过滤掉。 */
+       所以超限的条目只能留空槽，不能截短数组 ——
+       旧实现 `new Array(Math.min(raw.length, TR_MAX_ITEMS))` 让长度变成 40，
+       与这条契约自相矛盾（注释写着「不能过滤掉」，代码却在截断）。 */
     const n = Math.min(raw.length, TR_MAX_ITEMS);
     let budget = TR_MAX_TOTAL;
-    const zh = new Array(n).fill('');
+    const zh = new Array(raw.length).fill('');
     const missing = [];
     const keys = geminiKeys(env);
     const hasGroq = !!(env && env.GROQ_API_KEY);
-    if (!keys.length && !hasGroq) return json({ error: 'no key', zh: [] }, 60, 503);
+    if (!keys.length && !hasGroq) return json({ error: 'no key', zh }, 60, 503);
 
     /* 先查 KV 里的预翻译表（云端每天增量生成），再退到 isolate 缓存 */
     const kvTable = await kvTrTable(env);
@@ -490,12 +514,19 @@ async function api(url, ctx, env, request) {
     let src = 'gemini';
     try {
       let got = null;
+      let lastGeminiError = '';
       if (keys.length) {
         try { got = await geminiTranslate(missing.map(i => raw[i]), keys); }
-        catch (ge) { got = null; }
+        catch (ge) { got = null; lastGeminiError = String((ge && ge.message) || ge); }
       }
       if (!got) {
-        if (!hasGroq) throw new Error('gemini failed, no groq fallback');
+        if (!hasGroq) {
+          /* ★ 必须把 Gemini 的原始错误带出去：旧实现只抛
+             'gemini failed, no groq fallback'，把真正的 429 吞掉了，
+             下面 /429/ 判定恒假 → 前端拿到 502 走 60 秒退避而不是 15 秒。 */
+          throw new Error('gemini failed, no groq fallback' +
+            (lastGeminiError ? ': ' + lastGeminiError : ''));
+        }
         src = 'groq';
         got = await groqTranslate(missing.map(i => raw[i]), env.GROQ_API_KEY);
       }
@@ -504,8 +535,10 @@ async function api(url, ctx, env, request) {
         const v = got[n];
         if (v && v !== raw[idx]) { zh[idx] = v; trSet(raw[idx], v, 30 * 86400); }
       });
-      /* 一条都没翻出来 = 上游异常，别用 200 骗前端 */
-      if (!zh.some(Boolean)) return json({ error: 'all empty', zh: [] }, 0, 502);
+      /* 一条都没翻出来 = 上游异常，别用 200 骗前端。
+         但 zh 仍要按请求长度返回（全空槽），否则前端对齐校验先失败，
+         拿到的是 'gq align' 而不是真实原因。 */
+      if (!zh.some(Boolean)) return json({ error: 'all empty', zh }, 0, 502);
       return json({ zh, src }, 86400);
     } catch (e) {
       const msg = String((e && e.message) || e);
@@ -514,7 +547,7 @@ async function api(url, ctx, env, request) {
       if (partial) return json({ zh, src, error: msg }, 0);
       /* 把 429 如实透传，前端才能走短退避而不是一律 60 秒 */
       const code = /429/.test(msg) ? 429 : 502;
-      return json({ error: msg, zh: [] }, 0, code);
+      return json({ error: msg, zh }, 0, code);
     }
   }
 
