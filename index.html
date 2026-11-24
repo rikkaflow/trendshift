@@ -85,6 +85,7 @@ footer a{color:var(--acc)}
 
 /* 无限滚动：哨兵不可见，只用于触发加载 */
 .sentinel{height:1px}
+.pgroup{display:block}
 
 /* 二级列表返回 */
 .backlink{color:var(--acc);font-weight:600;font-size:12px;margin-right:8px;
@@ -471,11 +472,15 @@ function render(){
 function renderBoard(){
   const pages = st.pages || [];
   if (!pages.length) return;
-  const html = pages.map(pg => pg.items.map(e => card(e, pg.prev)).join('')).join('');
+  const html = pages.map(pg =>
+    '<div class="pgroup" data-period="' + esc(pg.period) + '">' +
+      pg.items.map(e => card(e, pg.prev)).join('') +
+    '</div>').join('');
   // 底部只留一个不可见的哨兵，供 IntersectionObserver 监听，不显示任何文字
   const tail = '<div id="loadmore" class="sentinel"></div>';
   $('#list').innerHTML = html + tail;
   armSentinel();
+  syncPeriodSelect();
 }
 
 /* 用 IntersectionObserver 监听底部哨兵——比 scroll 事件可靠（WebView 里 scroll 可能不派发） */
@@ -530,6 +535,7 @@ function maybeLoadMore(){
    ① IntersectionObserver ② scroll 事件 ③ 轻量轮询兜底 */
 let lastCheck = 0;
 window.addEventListener('scroll', () => {
+  syncPeriodSelect();
   const now = Date.now();
   if (now - lastCheck < 300) return;
   lastCheck = now;
@@ -537,9 +543,28 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 
 function checkNearBottom(){
+  syncPeriodSelect();
   if (!st.hasMore || st.loading || !BOARD.has(st.tf) || st.q) return;
   const remain = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
   if (remain < 700) loadMoreBoard();
+}
+
+/* 顶栏期次选择器跟随滚动：取当前视口顶部所在的那一期 */
+function syncPeriodSelect(){
+  if (!BOARD.has(st.tf) || st.q || !st.pages || !st.pages.length) return;
+  const groups = document.querySelectorAll('.pgroup');
+  if (!groups.length) return;
+  // 顶栏高度，作为「视口顶部」的判定线
+  const line = (document.querySelector('header')?.getBoundingClientRect().height || 0) + 8;
+  let cur = st.pages[0].period;
+  for (const g of groups) {
+    const r = g.getBoundingClientRect();
+    if (r.top <= line) cur = g.dataset.period;   // 已划过的最后一个
+    else break;
+  }
+  const sel = $('#period');
+  if (sel && sel.value !== cur) sel.value = cur;
+  st.period = cur;
 }
 
 /* 轮询兜底：只在有更多内容时运行，页面隐藏时自动跳过，开销可忽略 */
@@ -606,9 +631,12 @@ async function refresh(force){
       const d = await api('api/list', { tf: st.tf, lang: st.lang, period: st.period, sort: st.sort });
       st.period = d.period;
       st.data = d;
-      // 无限滚动状态：已加载页 + 剩余期次
+      // 无限滚动状态：从所选期次开始，只保留它及更早的期次（保持时间倒序）
+      const all = d.periods || [];
+      const startIdx = Math.max(0, all.indexOf(d.period));
+      const tail = all.slice(startIdx);          // [W46, W45, W44, ...]
       st.pages = [{ period: d.period, items: d.items, prev: d.prev }];
-      st.periodsLeft = (d.periods || []).filter(x => x !== d.period);
+      st.periodsLeft = tail.slice(1);            // 剩余更早的
       st.hasMore = st.periodsLeft.length > 0;
       st.loading = false;
     }
@@ -851,9 +879,24 @@ function buildControls(){
     if (BOARD.has(st.tf)) loadLangs();
     refresh(false);
   };
-  $('#lang').onchange = ev => { st.lang = ev.target.value; st.period = null; refresh(false); };
-  $('#sort').onchange = ev => { st.sort = ev.target.value; refresh(false); };
-  $('#period').onchange = ev => { st.period = ev.target.value; refresh(false); };
+  $('#lang').onchange = ev => {
+    st.lang = ev.target.value; st.period = null;
+    st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+    window.scrollTo(0, 0);
+    refresh(false);
+  };
+  $('#sort').onchange = ev => {
+    st.sort = ev.target.value;
+    st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+    window.scrollTo(0, 0);
+    refresh(false);
+  };
+  $('#period').onchange = ev => {
+    st.period = ev.target.value;
+    st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+    window.scrollTo(0, 0);
+    refresh(false);
+  };
   let timer;
   $('#q').oninput = ev => {
     clearTimeout(timer);
