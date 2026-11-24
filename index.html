@@ -1,0 +1,1056 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Trendshift</title>
+<meta name="theme-color" content="#0b0d12">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#0b0d12; --card:#151922; --card2:#1b2029; --line:#242a35;
+  --fg:#e8ecf3; --dim:#8b93a3; --acc:#7c8cff; --good:#4ade80; --warn:#fbbf24;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC",sans-serif}
+a{color:inherit;text-decoration:none}
+header{position:sticky;top:0;z-index:20;background:#0b0d12;
+  border-bottom:1px solid var(--line);padding:10px 14px 8px}
+.top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.logo{font-weight:700;font-size:17px;letter-spacing:-.2px}
+.logo b{color:var(--acc)}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:6px 13px;border-radius:999px;border:1px solid var(--line);
+  background:var(--card);color:var(--dim);font-size:13px;white-space:nowrap}
+.tab.on{background:var(--acc);border-color:var(--acc);color:#0b0d12;font-weight:600}
+.row2{display:flex;gap:6px;margin-bottom:6px}
+.row2:last-child{margin-bottom:0}
+select,input{font:inherit;font-size:13px;color:var(--fg);background:var(--card);
+  border:1px solid var(--line);border-radius:9px;padding:7px 9px;min-width:0}
+select{max-width:48%}
+input{flex:1}
+main{padding:12px 14px 40px}
+.card{display:flex;gap:10px;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:12px;margin-bottom:8px}
+.card:active{background:var(--card2)}
+.rank{width:26px;flex:0 0 26px;font-variant-numeric:tabular-nums;font-weight:700;
+  font-size:13px;color:var(--dim);padding-top:2px;text-align:center}
+.rank.r1{color:#f5c542}.rank.r2{color:#c9d2e3}.rank.r3{color:#d08a52}
+.body{flex:1;min-width:0}
+.l1{display:flex;align-items:baseline;gap:8px}
+.name{font-weight:650;font-size:15px;word-break:break-word;color:var(--fg)}
+.gain{margin-left:auto;font-size:13px;font-weight:700;color:var(--good);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.meta{font-size:12px;color:var(--dim);margin-top:2px}
+.desc{font-size:13px;color:#b9c1cf;margin-top:6px;display:-webkit-box;
+  -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.chip{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--card2);
+  color:var(--dim);border:1px solid var(--line)}
+.chip.new{color:#0b0d12;background:var(--good);border-color:var(--good);font-weight:600}
+.chip.rise{color:var(--warn);border-color:#3a3320;background:#231d10}
+.chip.lang{color:var(--acc);border-color:#2b3350;background:#181d2b}
+.chip.up{color:#4ade80;border-color:#1e3a2a;background:#12241a}
+.chip.down{color:#f87171;border-color:#3a2020;background:#241313}
+.empty,.err{text-align:center;color:var(--dim);padding:40px 10px;font-size:14px}
+.err button{margin-top:12px;border:1px solid var(--line);background:var(--card);
+  border-radius:9px;padding:8px 16px}
+footer{color:var(--dim);font-size:11px;text-align:center;padding:0 20px 30px;line-height:1.8}
+footer a{color:var(--acc)}
+.skel{height:78px;border-radius:14px;background:linear-gradient(90deg,#151922,#1c2130,#151922);
+  background-size:200% 100%;animation:sh 1.2s infinite;margin-bottom:8px}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* 主题 / 统计 / 开发者 组件 */
+.grp{margin-bottom:18px}
+.grp-h{font-size:12px;font-weight:650;color:var(--dim);letter-spacing:.4px;
+  margin-bottom:8px;text-transform:uppercase}
+.tag{display:inline-block;margin:0 6px 6px 0;padding:7px 12px;border-radius:9px;
+  background:var(--card);border:1px solid var(--line);font-size:13px;color:var(--fg)}
+.tag:active{background:var(--card2)}
+.av{width:22px;height:22px;border-radius:50%;flex:0 0 22px;object-fit:cover;
+  background:var(--card2)}
+.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:7px;font-size:13px}
+.bar-l{width:96px;flex:0 0 96px;color:var(--fg);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.bar-t{flex:1;height:16px;background:var(--card);border-radius:5px;overflow:hidden;
+  border:1px solid var(--line)}
+.bar-f{height:100%;background:linear-gradient(90deg,#7c8cff,#4ade80);border-radius:4px}
+.bar-v{width:62px;flex:0 0 62px;text-align:right;color:var(--dim);
+  font-variant-numeric:tabular-nums;font-size:12px}
+
+/* 二级列表返回 */
+.backlink{color:var(--acc);font-weight:600;font-size:12px;margin-right:8px;
+  text-transform:none;letter-spacing:0}
+
+/* 热议全文 */
+.mhead{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.mmeta{font-size:12px;color:var(--dim);margin-bottom:14px}
+.mbody{font-size:15px;line-height:1.72;color:var(--fg);white-space:pre-wrap;
+  word-break:break-word;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:14px}
+
+/* 排序面板 */
+.hint{font-size:12px;color:var(--dim);margin-bottom:14px;line-height:1.6}
+.olist{display:flex;flex-direction:column;gap:7px}
+.orow{display:flex;align-items:center;gap:7px;background:var(--card);
+  border:1px solid var(--line);border-radius:11px;padding:9px 10px}
+.orow.off{opacity:.42}
+.oname{flex:1;font-size:14px;font-weight:600}
+.oic{width:38px;height:32px;border-radius:8px;border:1px solid var(--line);
+  background:var(--card2);font-size:12px;color:var(--fg);display:grid;place-items:center}
+.oic[disabled]{opacity:.3}
+.oic.on{color:var(--dim);border-style:dashed}
+
+/* 详情页：与列表互斥显示的普通文档流，不用 fixed 覆盖层
+   （fixed + 合成层在部分 Android WebView 上整层不绘制） */
+.page{display:none;flex-direction:column;background:var(--bg);min-height:100vh}
+.page.on{display:flex}
+body.detail header,body.detail main,body.detail footer{display:none}
+.pbar{display:flex;align-items:center;gap:10px;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:#0b0d12;position:sticky;top:0;z-index:5}
+.back{width:32px;height:32px;border-radius:9px;border:1px solid var(--line);
+  background:var(--card);display:grid;place-items:center;font-size:16px;flex:0 0 32px}
+.pbar .t{font-weight:650;font-size:15px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1}
+.pbody{flex:1;padding:16px 14px calc(28px + env(safe-area-inset-bottom,0px))}
+.d-title{display:block;font-size:19px;font-weight:750;line-height:1.3;
+  word-break:break-word;margin-bottom:8px;color:var(--fg)}
+.d-title:active{color:var(--acc)}
+.d-sub{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px}
+.d-desc{font-size:14px;color:#c6cdda;line-height:1.62}
+.tr-note{font-size:11px;color:var(--dim);margin-top:6px;display:flex;align-items:center;gap:8px}
+.tr-note button{font-size:11px;color:var(--acc);text-decoration:underline}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:16px 0 4px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0 4px}
+.cell{background:var(--card);border:1px solid var(--line);border-radius:11px;
+  padding:10px 8px;text-align:center}
+.cell b{display:block;font-size:16px;font-variant-numeric:tabular-nums;line-height:1.25}
+.cell span{font-size:10.5px;color:var(--dim);display:block;margin-top:2px}
+.sect{margin-top:22px}
+.sect-h{font-size:12px;font-weight:650;color:var(--dim);letter-spacing:.4px;
+  text-transform:uppercase;margin-bottom:9px}
+.spark{width:100%;height:104px;display:block}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:9px 14px;font-size:13px;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.kv dt{color:var(--dim);white-space:nowrap}
+.kv dd{margin:0;word-break:break-word}
+.kv a{color:var(--acc)}
+.pactions{display:flex;gap:8px;margin-top:22px}
+.btn{flex:1;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);
+  background:var(--card2);font-size:14px;font-weight:650}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#0b0d12}
+.hist{display:flex;flex-direction:column;gap:5px}
+.hrow{display:flex;align-items:center;gap:10px;font-size:13px;
+  background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 11px}
+.hrow .p{color:var(--dim);font-variant-numeric:tabular-nums;min-width:84px}
+.hrow .r{margin-left:auto;font-variant-numeric:tabular-nums;font-weight:650}
+.hrow .g{color:var(--good);font-variant-numeric:tabular-nums;min-width:58px;text-align:right}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <div class="logo">Trend<b>shift</b></div>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="row2" id="rowSort">
+    <select id="lang"><option value="">全部语言</option></select>
+    <select id="sort">
+      <option value="rank">按榜单排名</option>
+      <option value="gain">按涨星数</option>
+      <option value="total">按总星数</option>
+    </select>
+  </div>
+  <div class="row2" id="rowStats" style="display:none">
+    <select id="stYear"></select>
+    <select id="stMonth"></select>
+    <select id="stMetric">
+      <option value="stars">新增 Star</option>
+      <option value="forks">新增 Fork</option>
+    </select>
+  </div>
+  <div class="row2" id="rowPeriod">
+    <select id="period"></select>
+    <input id="q" type="search" placeholder="搜仓库/描述（全期次）" autocomplete="off">
+  </div>
+</header>
+<main id="list"></main>
+<footer>
+  数据源 <a href="https://trendshift.io" target="_blank" rel="noopener">trendshift.io</a>
+  （第三方静态镜像，每日 20:17 UTC 同步）· 描述默认机翻中文，可在详情页切原文
+</footer>
+
+<div class="page" id="page">
+  <div class="pbar">
+    <button class="back" id="back">←</button>
+    <div class="t" id="ptitle"></div>
+  </div>
+  <div class="pbody" id="pbody"></div>
+</div>
+
+<script>
+/* 栏目定义。默认顺序按使用频率：日更榜单最常用，长期/统计类靠后。
+   用户可在界面里拖动排序或隐藏（存 localStorage）。 */
+const TFS = [
+  ['weekly','本周'],['daily','今日'],['mentions','热议'],['topics','主题'],
+  ['monthly','本月'],['ghtrend','热门'],['devs','开发者'],['yearly','今年'],['stats','统计'],
+];
+const DEFAULT_ORDER = TFS.map(t => t[0]);
+const TAB_LABEL = Object.fromEntries(TFS);
+const BOARD = new Set(['daily','weekly','monthly','yearly']);
+const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions']);
+const st = {
+  tf:'weekly', lang:'', sort:'rank', period:null, q:'',
+  data:null, err:null, langs:null, zh:true, cur:null,
+  metric:'stars', statYear:null, statMonth:null,
+  order: null, hidden: null, mcache: null,
+};
+/* 标签顺序与隐藏项（本地持久化） */
+function loadTabPrefs(){
+  const o = read('ts:order');
+  const h = read('ts:hidden');
+  st.order = (Array.isArray(o) && o.length ? o : DEFAULT_ORDER.slice())
+    .filter(id => DEFAULT_ORDER.includes(id));
+  for (const id of DEFAULT_ORDER) if (!st.order.includes(id)) st.order.push(id);
+  st.hidden = new Set(Array.isArray(h) ? h.filter(id => DEFAULT_ORDER.includes(id)) : []);
+  // 至少要留一个可见，否则界面会空白
+  if (st.hidden.size >= DEFAULT_ORDER.length) st.hidden = new Set();
+  if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+}
+function saveTabPrefs(){
+  save('ts:order', st.order);
+  save('ts:hidden', [...st.hidden]);
+}
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function k(n){
+  n = Number(n) || 0;
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'') + 'M';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1).replace(/\.0$/,'') + 'k';
+  return String(n);
+}
+const save = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} };
+const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch(e) { return null; } };
+const cache = new Map();
+
+async function api(path, params){
+  const u = new URL(path, location.href);
+  for (const [kk, vv] of Object.entries(params || {})) if (vv != null) u.searchParams.set(kk, vv);
+  const key = u.toString();
+  if (cache.has(key)) return cache.get(key);
+  const r = await fetch(u, { headers: { accept: 'application/json' } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json();
+  cache.set(key, j);
+  return j;
+}
+
+/* GitHub 仓库补充信息：客户端直连（api.github.com 有 CORS），缓存 6 小时。
+   未认证配额 60/h/IP，失败静默降级。 */
+async function ghInfo(name){
+  if (!/^[\w.-]+\/[\w.-]+$/.test(name)) return { ok: false };
+  const key = 'gh:' + name.toLowerCase();
+  const hit = read(key);
+  if (hit && Date.now() - hit.t < 6 * 3600 * 1000) return hit.v;
+  try {
+    const r = await fetch('https://api.github.com/repos/' + name, {
+      headers: { accept: 'application/vnd.github+json' },
+    });
+    if (!r.ok) return { ok: false, status: r.status };
+    const d = await r.json();
+    const v = {
+      ok: true,
+      stars: d.stargazers_count, forks: d.forks_count,
+      issues: d.open_issues_count, watchers: d.subscribers_count,
+      homepage: d.homepage || '', topics: d.topics || [],
+      license: (d.license || {}).spdx_id || '',
+      pushed_at: d.pushed_at || '', created_at: d.created_at || '',
+      archived: !!d.archived, language: d.language || '',
+    };
+    save(key, { t: Date.now(), v });
+    return v;
+  } catch(e) {
+    return { ok: false };
+  }
+}
+
+/* 批量机翻：浏览器直连 Google（CORS 开放）。
+   每条独立请求 + 并发 6：原文本身可能含换行，合并成一批会错位对不齐。
+   8s 超时，失败保留原文，绝不阻塞渲染。 */
+function fetchWithTimeout(url, ms){
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(timer));
+}
+
+async function translateOne(text){
+  const t = String(text).slice(0, 480);
+  if (!t.trim()) return '';
+  if (/[\u4e00-\u9fa5]/.test(t)) return t;   // 已是中文，别浪费请求
+  const u = 'https://translate.googleapis.com/translate_a/single' +
+    '?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(t);
+  const r = await fetchWithTimeout(u, 8000);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const d = await r.json();
+  return (d[0] || []).map(x => x[0] || '').join('').trim();
+}
+
+async function translateBatch(texts){
+  const uniq = [...new Set(texts.filter(Boolean))];
+  if (!uniq.length) return {};
+  const map = {};
+  const CONCURRENCY = 6;
+  for (let i = 0; i < uniq.length; i += CONCURRENCY) {
+    const chunk = uniq.slice(i, i + CONCURRENCY);
+    const got = await Promise.all(chunk.map(async src => {
+      try { return [src, await translateOne(src)]; }
+      catch(e) { return [src, '']; }
+    }));
+    for (const [src, zh] of got) if (zh && zh !== src) map[src] = zh;
+  }
+  return map;
+}
+
+/* ---------- 列表 ---------- */
+function skeleton(n){ $('#list').innerHTML = new Array(n).fill('<div class="skel"></div>').join(''); }
+
+/* ---------- 主题 ---------- */
+function renderTopics(topics){
+  if (!topics || !topics.length) { $('#list').innerHTML = '<div class="empty">暂无主题</div>'; return; }
+  const groups = new Map();
+  for (const t of topics) {
+    const ch = (t.n[0] || '#').toUpperCase();
+    if (!groups.has(ch)) groups.set(ch, []);
+    groups.get(ch).push(t);
+  }
+  const keys = [...groups.keys()].sort();
+  $('#list').innerHTML = keys.map(ch =>
+    '<div class="grp"><div class="grp-h">' + esc(ch) + '</div>' +
+      groups.get(ch).map(t =>
+        '<button class="tag" data-slug="' + esc(t.s) + '">' + esc(T(t.n)) + '</button>'
+      ).join('') +
+    '</div>').join('');
+}
+
+/* ---------- 主题下的仓库 ---------- */
+function renderTopic(d){
+  const head = '<div class="grp"><div class="grp-h">' +
+    '<button class="backlink" id="topicBack">← 全部主题</button>' +
+    esc(d.slug) + ' · ' + d.items.length + ' 个仓库</div></div>';
+  if (!d.items.length) { $('#list').innerHTML = head + '<div class="empty">该主题暂无仓库</div>'; return; }
+  $('#list').innerHTML = head + d.items.map(e =>
+    '<article class="card" data-name="' + esc(e.n) + '">' +
+      '<div class="body">' +
+        '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
+          '<span class="gain">' + k(e.s) + '★</span></div>' +
+        '<div class="meta">' + k(e.s) + '★ · ' + k(e.f) + ' fork' +
+          (e.c ? ' · 建于 ' + esc(String(e.c).slice(0, 10)) : '') + '</div>' +
+        (e.d ? '<div class="desc">' + esc(T(e.d)) + '</div>' : '') +
+        (e.l ? '<div class="chips"><span class="chip lang">' + esc(e.l) + '</span></div>' : '') +
+      '</div></article>').join('');
+  const tb = $('#topicBack');
+  if (tb) tb.onclick = () => {
+    if (history.state && history.state.v) history.back();
+    else { st.topicSlug = null; refresh(false); }
+  };
+}
+
+/* ---------- GitHub 热门仓库（长期反复上榜） ---------- */
+function renderGh(items){
+  if (!items || !items.length) { $('#list').innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  $('#list').innerHTML = items.map((e, i) =>
+    '<article class="card" data-name="' + esc(e.n) + '">' +
+      '<div class="rank' + (i === 0 ? ' r1' : i === 1 ? ' r2' : i === 2 ? ' r3' : '') + '">' + (i + 1) + '</div>' +
+      '<div class="body">' +
+        '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
+          '<span class="gain">上榜 ' + e.cnt + ' 次</span></div>' +
+        '<div class="meta">历史最好第 ' + e.best + ' 名</div>' +
+        (e.d ? '<div class="desc">' + esc(T(e.d)) + '</div>' : '') +
+      '</div></article>').join('');
+}
+
+/* ---------- 开发者 ---------- */
+function renderDevs(items){
+  if (!items || !items.length) { $('#list').innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  $('#list').innerHTML = items.map((d, i) =>
+    '<article class="card">' +
+      '<div class="rank' + (i === 0 ? ' r1' : i === 1 ? ' r2' : i === 2 ? ' r3' : '') + '">' + (i + 1) + '</div>' +
+      '<div class="body">' +
+        '<div class="l1">' +
+          (d.avatar ? '<img class="av" src="' + esc(d.avatar) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') +
+          '<span class="name">' + esc(d.name || d.login) + '</span>' +
+          '<a class="gain" href="https://github.com/' + esc(d.login) + '" target="_blank" rel="noopener">@' + esc(d.login) + '</a>' +
+        '</div>' +
+        '<div class="meta">' + k(d.followers) + ' 关注者 · ' + k(d.repos) + ' 仓库' +
+          ' · 上榜 ' + d.cnt + ' 次</div>' +
+        (d.bio ? '<div class="desc">' + esc(T(d.bio)) + '</div>' : '') +
+        ((d.company || d.location) ? '<div class="chips">' +
+          (d.company ? '<span class="chip">' + esc(d.company) + '</span>' : '') +
+          (d.location ? '<span class="chip">' + esc(d.location) + '</span>' : '') +
+          '</div>' : '') +
+      '</div></article>').join('');
+}
+
+/* ---------- 统计（语言榜） ---------- */
+function renderStats(d){
+  const items = d.items || [];
+  if (!items.length) { $('#list').innerHTML = '<div class="empty">该月暂无数据</div>'; return; }
+  const max = Math.max(...items.map(x => x.v)) || 1;
+  const label = d.metric === 'forks' ? 'fork' : 'star';
+  $('#list').innerHTML =
+    '<div class="grp"><div class="grp-h">' + d.year + ' 年 ' + d.month + ' 月 · 各语言新增 ' + label + '</div></div>' +
+    items.map(x => {
+      const w = Math.max(2, Math.round(x.v / max * 100));
+      return '<div class="bar-row">' +
+        '<div class="bar-l">' + esc(x.l) + '</div>' +
+        '<div class="bar-t"><div class="bar-f" style="width:' + w + '%"></div></div>' +
+        '<div class="bar-v">' + k(x.v) + '</div>' +
+      '</div>';
+    }).join('');
+}
+
+function render(){
+  const d = st.data;
+  if (st.err) {
+    $('#list').innerHTML = '<div class="err">加载失败：' + esc(st.err) + '<br><button id="retry">重试</button></div>';
+    const b = $('#retry'); if (b) b.onclick = () => refresh(true);
+    return;
+  }
+  if (!d) return;
+
+  if (d.topics) { renderTopics(d.topics); return; }
+  if (d.topic)  { renderTopic(d.topic);  return; }
+  if (d.ghtrend) { renderGh(d.ghtrend);  return; }
+  if (d.devs)   { renderDevs(d.devs);    return; }
+  if (d.stats)  { renderStats(d.stats);  return; }
+
+  if (d.mentions) {
+    if (!d.mentions.items.length) { $('#list').innerHTML = '<div class="empty">暂无热议</div>'; return; }
+    $('#list').innerHTML = d.mentions.items.map(m => {
+      const t = (m.at || '').replace('T', ' ').slice(5, 16);
+      return '<article class="card" data-mention="' + m.id + '"' +
+        (m.repo ? ' data-name="' + esc(m.repo) + '"' : '') + '>' +
+        '<div class="body">' +
+          '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
+            '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
+          '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
+          (m.text ? '<div class="desc">' + esc(T(m.text)) + '</div>' : '') +
+          (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
+        '</div></article>';
+    }).join('');
+    return;
+  }
+
+  if (d.search) {
+    if (!d.search.items.length) {
+      $('#list').innerHTML = '<div class="empty">没有匹配的仓库（需 ≥2 字符）</div>';
+      return;
+    }
+    $('#list').innerHTML = d.search.items.map(e => card(e, null)).join('');
+    return;
+  }
+
+  buildPeriods(d.periods, d.period);
+  if (!d.items.length) { $('#list').innerHTML = '<div class="empty">该筛选下暂无数据</div>'; return; }
+  $('#list').innerHTML = d.items.map(e => card(e, d.prev)).join('');
+}
+
+/* 统一取译：有译文用译文，否则原文 */
+function T(text){
+  if (!text) return '';
+  const zh = st.zh ? (st.tr || {})[text] : '';
+  return zh || text;
+}
+function descOf(e){ return T(e.d || ''); }
+
+function card(e, prev){
+  const days = e.c ? (Date.now() - Date.parse(e.c)) / 864e5 : 999;
+  const chips = [];
+  if (e.l) chips.push('<span class="chip lang">' + esc(e.l) + '</span>');
+  if (days <= 30) chips.push('<span class="chip new">新项目</span>');
+  if (prev) {
+    const pr = prev[e.n];
+    if (pr == null) chips.push('<span class="chip rise">新上榜</span>');
+    else if (pr > e.r) chips.push('<span class="chip up">↑' + (pr - e.r) + '</span>');
+    else if (pr < e.r) chips.push('<span class="chip down">↓' + (e.r - pr) + '</span>');
+  }
+  if ((e.m || []).length) chips.push('<span class="chip">提及 ' + esc(e.m.join(' / ')) + '</span>');
+  for (const t of (e.t || []).slice(0, 2)) chips.push('<span class="chip">' + esc(t) + '</span>');
+
+  const r = e.r, rc = r === 1 ? ' r1' : r === 2 ? ' r2' : r === 3 ? ' r3' : '';
+  const desc = descOf(e);
+  return '<article class="card" data-name="' + esc(e.n) + '">' +
+    '<div class="rank' + rc + '">' + r + '</div>' +
+    '<div class="body">' +
+      '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
+        '<span class="gain">+' + k(e.g) + '</span></div>' +
+      '<div class="meta">' + k(e.s) + '★ · ' + k(e.f) + ' fork' +
+        (e.c ? ' · 建于 ' + esc(e.c.slice(0, 10)) : '') + '</div>' +
+      (desc ? '<div class="desc">' + esc(desc) + '</div>' : '') +
+      (chips.length ? '<div class="chips">' + chips.join('') + '</div>' : '') +
+    '</div></article>';
+}
+
+async function refresh(force){
+  st.data = null; st.err = null;
+  skeleton(5);
+  try {
+    if (st.tf === 'mentions') {
+      st.data = { mentions: await api('api/mentions') };
+    } else if (st.tf === 'topics') {
+      st.data = st.topicSlug
+        ? { topic: await api('api/topic', { slug: st.topicSlug }) }
+        : { topics: (await api('api/topics')).topics };
+    } else if (st.tf === 'ghtrend') {
+      st.data = { ghtrend: (await api('api/ghtrending')).items };
+    } else if (st.tf === 'devs') {
+      st.data = { devs: (await api('api/devs')).items };
+    } else if (st.tf === 'stats') {
+      const now = new Date();
+      const y = st.statYear || now.getUTCFullYear();
+      const m = st.statMonth || (now.getUTCMonth() + 1);
+      st.data = { stats: await api('api/stats', { year: y, month: m, metric: st.metric }) };
+    } else if (st.q) {
+      st.data = { search: await api('api/search', { tf: st.tf, lang: st.lang, q: st.q }) };
+    } else {
+      const d = await api('api/list', { tf: st.tf, lang: st.lang, period: st.period, sort: st.sort });
+      st.period = d.period;
+      st.data = d;
+    }
+    save('ts:last:' + st.tf + ':' + st.lang, st.data);
+  } catch (e) {
+    const cached = read('ts:last:' + st.tf + ':' + st.lang);
+    if (cached) st.data = cached;
+    else st.err = e.message || String(e);
+  }
+  render();
+  if (st.data && !st.q) translateView();
+}
+
+/* 机翻：先渲染原文，译文到达后原地替换。按当前视图收集要译的文本 */
+function collectTexts(){
+  const d = st.data || {};
+  const out = [];
+  const push = v => { if (v && typeof v === 'string') out.push(v); };
+  if (d.items) d.items.forEach(e => push(e.d));
+  if (d.search) d.search.items.forEach(e => push(e.d));
+  if (d.topics) d.topics.forEach(t => push(t.n));
+  if (d.topic) d.topic.items.forEach(e => push(e.d));
+  if (d.ghtrend) d.ghtrend.forEach(e => push(e.d));
+  if (d.devs) d.devs.forEach(e => push(e.bio));
+  if (d.mentions) d.mentions.items.forEach(e => push(e.text));
+  return out;
+}
+
+/* 译文缓存：跨会话复用，避免每次打开重翻。上限 800 条防爆 */
+const TR_KEY = 'ts:trcache';
+function saveTrCache(){
+  const all = Object.entries(st.tr || {});
+  if (all.length > 800) st.tr = Object.fromEntries(all.slice(-800));
+  save(TR_KEY, st.tr);
+}
+function loadTrCache(){
+  const c = read(TR_KEY);
+  st.tr = (c && typeof c === 'object') ? c : {};
+}
+
+/* 只翻首屏（前 12 条）：全量翻译长文本要等十几秒，滚动时再补 */
+async function translateView(){
+  if (!st.zh) return;
+  const view = st.tf;
+  const pending = collectTexts().slice(0, 12).filter(t => !(st.tr || {})[t]);
+  if (!pending.length) return;
+  const map = await translateBatch([...new Set(pending)]);
+  if (!Object.keys(map).length) return;
+  st.tr = Object.assign(st.tr || {}, map);
+  saveTrCache();
+  if (st.tf === view) render();          // 用户已切走就别覆盖当前页
+}
+
+/* ---------- 详情页 ---------- */
+function spark(series){
+  if (!series || series.length < 2) return '<div class="empty" style="padding:14px 0">历史不足两期</div>';
+  const w = 320, h = 100, pad = 8;
+  const vals = series.map(x => x.r);
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const span = Math.max(1, max - min);
+  const pts = series.map((x, i) => {
+    const px = pad + (w - pad * 2) * (i / (series.length - 1));
+    const py = pad + (h - pad * 2) * ((x.r - min) / span);
+    return [px, py];
+  });
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const lastP = pts[pts.length - 1];
+  return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+    '<path d="' + d + '" fill="none" stroke="#7c8cff" stroke-width="2" stroke-linejoin="round"/>' +
+    '<circle cx="' + lastP[0].toFixed(1) + '" cy="' + lastP[1].toFixed(1) + '" r="3.5" fill="#4ade80"/>' +
+    '</svg>';
+}
+
+function fmtDate(s){ return s ? String(s).slice(0, 10) : ''; }
+
+async function renderRepo(name){
+  st.cur = name;
+  $('#ptitle').textContent = name;
+  document.title = name + ' · Trendshift';
+  document.body.classList.add('detail');
+  $('#page').classList.add('on');
+  window.scrollTo(0, st.listScroll || 0);
+  const body = $('#pbody');
+  body.innerHTML = '<div class="empty">加载中…</div>';
+  body.scrollTop = 0;
+
+  const qs = { name, tf: st.tf === 'mentions' ? 'weekly' : st.tf };
+  const [repo, gh] = await Promise.all([
+    api('api/repo', qs).catch(e => ({ error: e.message })),
+    ghInfo(name),
+  ]);
+
+  if (repo.error && !gh.ok) {
+    body.innerHTML = '<div class="err">加载失败：' + esc(repo.error) + '</div>';
+    return;
+  }
+
+  const lt = repo.latest || {};
+  const descEn = lt.d || '';
+  let descZh = st.zh ? (st.tr || {})[descEn] : '';
+  const series = repo.series || [];
+
+  const g = gh.ok ? gh : {};
+  const lang = lt.l || g.language || '';
+  const stars = g.stars != null ? g.stars : lt.s;
+  const forks = g.forks != null ? g.forks : lt.f;
+  const topics = g.topics || [];
+  const lic = g.license || '';
+
+  const histRows = series.slice().reverse().slice(0, 12).map(x =>
+    '<div class="hrow"><span class="p">' + esc(x.p) + '</span>' +
+      '<span>第 ' + x.r + ' 名</span>' +
+      '<span class="r">+' + k(x.g) + '</span></div>').join('');
+
+  const kv = [];
+  if (lang) kv.push(['语言', esc(lang)]);
+  if (lic) kv.push(['许可证', esc(lic)]);
+  if (g.archived) kv.push(['状态', '已归档']);
+  if (g.created_at || lt.c) kv.push(['创建', fmtDate(g.created_at || lt.c)]);
+  if (g.pushed_at) kv.push(['最近推送', fmtDate(g.pushed_at)]);
+  if (g.homepage) kv.push(['主页', '<a href="' + esc(g.homepage) + '" target="_blank" rel="noopener">' + esc(g.homepage) + '</a>']);
+  if (topics.length) kv.push(['标签', topics.map(t => esc(t)).join(' · ')]);
+
+  body.innerHTML =
+    '<a class="d-title" href="https://github.com/' + esc(name) + '" ' +
+      'target="_blank" rel="noopener">' + esc(name) + ' ↗</a>' +
+    '<div class="d-sub">' +
+      (lang ? '<span class="chip lang">' + esc(lang) + '</span>' : '') +
+      (lic ? '<span class="chip">' + esc(lic) + '</span>' : '') +
+      (repo.periods ? '<span class="chip">上榜 ' + repo.periods + ' 期</span>' : '') +
+      (repo.best ? '<span class="chip">最好 #' + repo.best + '</span>' : '') +
+    '</div>' +
+    (descEn ? '<div class="d-desc" id="ddesc">' + esc(descZh || descEn) + '</div>' +
+      '<div class="tr-note"><span>' + (descZh ? '机器翻译' : (st.zh ? '正在翻译…' : '原文')) + '</span>' +
+      '<button id="trtoggle">' + (descZh || st.zh ? '看原文' : '看中文') + '</button></div>' : '') +
+
+    '<div class="grid4">' +
+      '<div class="cell"><b>' + k(stars) + '</b><span>Stars</span></div>' +
+      '<div class="cell"><b>' + k(forks) + '</b><span>Forks</span></div>' +
+      '<div class="cell"><b>' + (g.issues != null ? k(g.issues) : '—') + '</b><span>Issues</span></div>' +
+      '<div class="cell"><b>' + (g.watchers != null ? k(g.watchers) : '—') + '</b><span>关注</span></div>' +
+    '</div>' +
+
+    (series.length ? '<div class="sect"><div class="sect-h">榜单表现</div>' +
+      '<div class="grid3">' +
+        '<div class="cell"><b>#' + series[series.length - 1].r + '</b><span>当前排名</span></div>' +
+        '<div class="cell"><b>+' + k(series[series.length - 1].g) + '</b><span>本期涨星</span></div>' +
+        '<div class="cell"><b>' + repo.periods + '</b><span>上榜期数</span></div>' +
+      '</div>' +
+      (series.length >= 2
+        ? '<div style="font-size:11px;color:var(--dim);margin:10px 0 2px">排名走势（越高越好，共 ' + series.length + ' 期）</div>' +
+          spark(series)
+        : '') +
+      '<div class="hist" style="margin-top:12px">' + histRows + '</div>' +
+      '</div>' : '') +
+
+    (kv.length ? '<div class="sect"><div class="sect-h">仓库信息</div><dl class="kv">' +
+      kv.map(([a, b]) => '<dt>' + a + '</dt><dd>' + b + '</dd>').join('') + '</dl></div>' : '') +
+
+    '<div class="pactions">' +
+      '<button class="btn" id="shshare">分享</button>' +
+    '</div>';
+
+  const sb = $('#shshare');
+  if (sb) sb.onclick = async () => {
+    const url = 'https://github.com/' + name;
+    try {
+      if (navigator.share) await navigator.share({ title: name, url });
+      else { await navigator.clipboard.writeText(url); sb.textContent = '已复制'; }
+    } catch(e) {}
+  };
+
+  const tt = $('#trtoggle');
+  if (tt) tt.onclick = async () => {
+    if (descZh) { descZh = ''; $('#ddesc').textContent = descEn; tt.textContent = '看中文'; }
+    else {
+      tt.textContent = '翻译中…';
+      const m = await translateBatch([descEn]);
+      descZh = m[descEn] || '';
+      st.tr = Object.assign(st.tr || {}, m);
+      $('#ddesc').textContent = descZh || descEn;
+      tt.textContent = descZh ? '看原文' : '翻译失败';
+    }
+  };
+}
+
+/* ---------- 控件 ---------- */
+async function loadLangs(){
+  try {
+    const d = await api('api/langs', { tf: st.tf });
+    st.langs = d.langs || [];
+    const sel = $('#lang');
+    // 切期次后若当前语言在该期次没有数据，退回「全部语言」，否则 select 会显示空白
+    if (st.lang && !st.langs.some(l => l.name === st.lang)) st.lang = '';
+    sel.innerHTML = '<option value="">全部语言</option>' +
+      st.langs.map(l => '<option value="' + esc(l.name) + '">' + esc(l.name) +
+        ' (' + l.count + ')</option>').join('');
+    sel.value = st.lang || '';
+  } catch(e) {
+    st.langs = null;
+  }
+}
+
+function buildControls(){
+  const visible = st.order.filter(id => !st.hidden.has(id));
+  $('#tabs').innerHTML = visible.map(id =>
+    '<button class="tab' + (st.tf === id ? ' on' : '') + '" data-tf="' + id + '">' +
+      esc(TAB_LABEL[id]) + '</button>').join('');
+  $('#sort').value = st.sort;
+  const hide = FILTERED.has(st.tf);
+  $('#rowSort').style.display = hide ? 'none' : '';
+  $('#rowPeriod').style.display = hide ? 'none' : '';
+  $('#rowStats').style.display = st.tf === 'stats' ? '' : 'none';
+  /* 长按 500ms 进入排序面板；期间若移动或抬起则取消 */
+  let pressTimer = null, pressed = false;
+  $('#tabs').addEventListener('pointerdown', ev => {
+    const b = ev.target.closest('.tab'); if (!b) return;
+    pressed = false;
+    pressTimer = setTimeout(() => {
+      pressed = true;
+      pressTimer = null;
+      if (navigator.vibrate) navigator.vibrate(12);
+      openTabOrder();
+    }, 500);
+  });
+  const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  $('#tabs').addEventListener('pointerup', cancelPress);
+  $('#tabs').addEventListener('pointercancel', cancelPress);
+  $('#tabs').addEventListener('pointermove', cancelPress);
+
+  $('#tabs').onclick = ev => {
+    if (pressed) { pressed = false; return; }   // 长按刚触发，别顺带切换
+    const b = ev.target.closest('.tab'); if (!b) return;
+    st.tf = b.dataset.tf; st.period = null; st.q = ''; $('#q').value = ''; st.topicSlug = null;
+    buildControls();
+    if (BOARD.has(st.tf)) loadLangs();
+    refresh(false);
+  };
+  $('#lang').onchange = ev => { st.lang = ev.target.value; st.period = null; refresh(false); };
+  $('#sort').onchange = ev => { st.sort = ev.target.value; refresh(false); };
+  $('#period').onchange = ev => { st.period = ev.target.value; refresh(false); };
+  let timer;
+  $('#q').oninput = ev => {
+    clearTimeout(timer);
+    const v = ev.target.value.trim();
+    timer = setTimeout(() => { st.q = v.length >= 2 ? v : ''; refresh(false); }, 320);
+  };
+}
+
+function initStatsControls(){
+  const now = new Date();
+  const cy = now.getUTCFullYear();
+  const cm = now.getUTCMonth() + 1;
+  const years = [cy, cy - 1, cy - 2];
+  $('#stYear').innerHTML = years.map(y =>
+    '<option value="' + y + '"' + (y === cy ? ' selected' : '') + '>' + y + ' 年</option>').join('');
+  const mons = Array.from({length: 12}, (_, i) => i + 1);
+  $('#stMonth').innerHTML = mons.map(m =>
+    '<option value="' + m + '"' + (m === cm ? ' selected' : '') + '>' + m + ' 月</option>').join('');
+  $('#stYear').onchange = ev => { st.statYear = +ev.target.value; refresh(false); };
+  $('#stMonth').onchange = ev => { st.statMonth = +ev.target.value; refresh(false); };
+  $('#stMetric').onchange = ev => { st.metric = ev.target.value; refresh(false); };
+}
+
+/* ---------- 热议全文（应用内阅读，不跳出去） ---------- */
+function renderMention(m){
+  st.cur = m.id;
+  document.body.classList.add('detail');
+  $('#page').classList.add('on');
+  document.title = '@' + (m.author || '') + ' · Trendshift';
+  $('#ptitle').textContent = '@' + (m.author || m.plat || '');
+
+  const when = (m.at || '').replace('T', ' ').slice(0, 16);
+  const body = m.text || '';
+  const zh = st.zh ? (st.tr || {})[body] : '';
+  let showing = zh ? 'zh' : 'src';
+
+  const paint = () => {
+    const shown = showing === 'zh' ? (zh || body) : body;
+    const p = $('#mtext');
+    if (p) p.textContent = shown;
+    const b = $('#mswitch');
+    if (b) b.textContent = showing === 'zh' ? '看原文' : '看中文';
+    const tag = $('#mtag');
+    if (tag) tag.textContent = showing === 'zh' ? '机器翻译' : '原文';
+  };
+
+  $('#pbody').innerHTML =
+    '<div class="mhead">' +
+      '<span class="chip">' + esc(m.plat || 'x') + '</span>' +
+      (m.repo ? '<span class="chip">' + esc(m.repo) + '</span>' : '') +
+      '<span class="chip" id="mtag">' + (zh ? '机器翻译' : '原文') + '</span>' +
+    '</div>' +
+    '<div class="mmeta">@' + esc(m.author || '') + ' · ' + esc(when) + ' UTC</div>' +
+    '<div class="mbody" id="mtext">' + esc(zh || body) + '</div>' +
+    '<div class="tr-note">' +
+      '<button id="mswitch">' + (zh ? '看原文' : '看中文') + '</button>' +
+    '</div>' +
+    '<div class="pactions">' +
+      (m.repo ? '<button class="btn" id="mrepo">看仓库</button>' : '') +
+      '<button class="btn" id="mcopy">复制链接</button>' +
+    '</div>' +
+    '<div class="hint" style="margin-top:12px">链接已复制后，可在浏览器里自行打开。'
+      + '应用内不再直接跳转 x.com，避免系统弹出「在应用中查看此帖子」。</div>';
+
+  $('#mswitch').onclick = () => {
+    showing = showing === 'zh' ? 'src' : 'zh';
+    paint();
+  };
+  const rb = $('#mrepo');
+  if (rb) rb.onclick = () => { setTimeout(() => go({ v: 'repo', name: m.repo }), 60); };
+  const cb = $('#mcopy');
+  if (cb) cb.onclick = async () => {
+    const link = m.link || ('https://x.com/' + (m.author || '') + '/status/' + (m.id || ''));
+    try {
+      await navigator.clipboard.writeText(link);
+      cb.textContent = '已复制';
+      setTimeout(() => { cb.textContent = '复制链接'; }, 1800);
+    } catch(e) {
+      cb.textContent = '复制失败';
+    }
+  };
+
+  // 没译文就先渲染原文，后台翻好再替换
+  if (!zh && st.zh && body) {
+    translateBatch([body]).then(map => {
+      const got = map[body];
+      if (!got) return;
+      st.tr = Object.assign(st.tr || {}, map);
+      saveTrCache();
+      if (st.cur !== m.id) return;      // 用户已离开
+      const p = $('#mtext');
+      if (p && showing === 'src') { /* 保持原文，等用户切换 */ }
+      const b = $('#mswitch');
+      if (b) b.textContent = '看中文';
+      const tag = $('#mtag');
+      if (tag) tag.textContent = '原文';
+      // 自动切到中文（用户要的是读内容）
+      showing = 'zh';
+      if (p) p.textContent = got;
+      if (tag) tag.textContent = '机器翻译';
+      if (b) b.textContent = '看原文';
+    });
+  }
+}
+
+/* ---------- 栏目排序面板 ---------- */
+let orderDraft = null, hiddenDraft = null;
+
+function openTabOrder(){
+  orderDraft = st.order.slice();
+  hiddenDraft = new Set(st.hidden);
+  document.body.classList.add('detail');
+  $('#page').classList.add('on');
+  $('#ptitle').textContent = '栏目排序';
+  renderOrderPanel();
+}
+
+function renderOrderPanel(){
+  const rows = orderDraft.map((id, i) => {
+    const off = hiddenDraft.has(id);
+    return '<div class="orow' + (off ? ' off' : '') + '">' +
+      '<div class="oname">' + esc(TAB_LABEL[id]) + '</div>' +
+      '<button class="oic" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+      '<button class="oic" data-down="' + i + '"' + (i === orderDraft.length - 1 ? ' disabled' : '') + '>↓</button>' +
+      '<button class="oic' + (off ? ' on' : '') + '" data-eye="' + id + '">' + (off ? '隐藏' : '显示') + '</button>' +
+    '</div>';
+  }).join('');
+
+  $('#pbody').innerHTML =
+    '<div class="hint">常用栏目放前面。长按顶部标签也能回到这里。</div>' +
+    '<div class="olist">' + rows + '</div>' +
+    '<div class="pactions">' +
+      '<button class="btn" id="oReset">恢复默认</button>' +
+      '<button class="btn pri" id="oDone">完成</button>' +
+    '</div>';
+
+  const body = $('#pbody');
+  body.onclick = ev => {
+    const up = ev.target.closest('[data-up]');
+    const dn = ev.target.closest('[data-down]');
+    const eye = ev.target.closest('[data-eye]');
+    if (up) {
+      const i = +up.dataset.up;
+      [orderDraft[i - 1], orderDraft[i]] = [orderDraft[i], orderDraft[i - 1]];
+      renderOrderPanel();
+    } else if (dn) {
+      const i = +dn.dataset.down;
+      [orderDraft[i + 1], orderDraft[i]] = [orderDraft[i], orderDraft[i + 1]];
+      renderOrderPanel();
+    } else if (eye) {
+      const id = eye.dataset.eye;
+      if (hiddenDraft.has(id)) hiddenDraft.delete(id);
+      else if (hiddenDraft.size < orderDraft.length - 1) hiddenDraft.add(id);
+      renderOrderPanel();
+    } else if (ev.target.id === 'oReset') {
+      orderDraft = DEFAULT_ORDER.slice();
+      hiddenDraft = new Set();
+      renderOrderPanel();
+    } else if (ev.target.id === 'oDone') {
+      st.order = orderDraft.slice();
+      st.hidden = new Set(hiddenDraft);
+      if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+      saveTabPrefs();
+      closeDetail();
+      buildControls();
+      refresh(false);
+    }
+  };
+}
+
+function buildPeriods(list, cur){
+  const sel = $('#period');
+  if (!list || !list.length) { sel.innerHTML = '<option>—</option>'; return; }
+  sel.innerHTML = list.map(p => '<option value="' + p + '"' + (p === cur ? ' selected' : '') + '>' + p + '</option>').join('');
+}
+
+/* ---------- 统一路由：repo / mention / topic 三类跳转都压历史栈 ---------- */
+/* 返回行为因此完全一致：手势返回或左上返回键，都是退回上一个视图，不会退出应用。 */
+
+function closeDetail(){
+  $('#page').classList.remove('on');
+  document.body.classList.remove('detail');
+  st.cur = null;
+  document.title = 'Trendshift';
+  window.scrollTo(0, st.listScroll || 0);
+}
+
+/* 热议对象缓存：popstate 时靠 id 找回原对象（列表数据可能已换） */
+function rememberMention(m){
+  st.mcache = st.mcache || new Map();
+  st.mcache.set(String(m.id), m);
+}
+function findMention(id){
+  if (st.mcache && st.mcache.has(String(id))) return st.mcache.get(String(id));
+  const list = (st.data && st.data.mentions) ? st.data.mentions.items : [];
+  return list.find(x => String(x.id) === String(id)) || null;
+}
+
+/* 渲染某个状态对应的视图（不碰历史栈） */
+function renderState(state){
+  if (!state || !state.v) {
+    closeDetail();
+    // 从主题二级列表返回时，要把主题清单恢复出来（列表本身被二级内容替换过）
+    if (st.tf === 'topics' && st.topicSlug) {
+      st.topicSlug = null;
+      refresh(false);
+    }
+    return;
+  }
+  if (state.v === 'repo') { renderRepo(state.name); return; }
+  if (state.v === 'mention') {
+    const m = findMention(state.id);
+    if (m) renderMention(m); else closeDetail();
+    return;
+  }
+  if (state.v === 'topic') {
+    closeDetail();
+    st.topicSlug = state.slug;
+    st.tf = 'topics';
+    buildControls();
+    refresh(false);
+    return;
+  }
+  closeDetail();
+}
+
+function hashOf(state){
+  if (!state || !state.v) return location.pathname + location.search;
+  if (state.v === 'repo') return '#repo=' + encodeURIComponent(state.name);
+  if (state.v === 'mention') return '#mention=' + encodeURIComponent(state.id);
+  if (state.v === 'topic') return '#topic=' + encodeURIComponent(state.slug);
+  return location.pathname + location.search;
+}
+
+/* 所有跳转的唯一入口：先压历史，再渲染 */
+function go(state){
+  st.listScroll = window.scrollY || 0;
+  try { history.pushState(state, '', hashOf(state)); } catch(e) {}
+  renderState(state);
+}
+
+/* 列表点击分发 */
+$('#list').addEventListener('click', ev => {
+  const tg = ev.target.closest('.tag');
+  if (tg) { go({ v: 'topic', slug: tg.dataset.slug }); return; }
+  if (ev.target.closest('a')) return;             // 真外链照常跳
+  const c = ev.target.closest('.card'); if (!c) return;
+
+  if (c.dataset.mention) {                        // 热议：应用内读全文
+    const m = findMention(c.dataset.mention);
+    if (m) { rememberMention(m); go({ v: 'mention', id: String(m.id) }); }
+    return;
+  }
+  const name = c.dataset.name;
+  if (name) go({ v: 'repo', name });
+});
+
+/* 返回键：一律交给浏览器，统一走 popstate */
+$('#back').onclick = () => {
+  if (history.state && history.state.v) history.back();
+  else renderState(null);
+};
+
+window.addEventListener('popstate', () => {
+  renderState(history.state);
+});
+
+/* 冷启动带 hash 直达；replaceState 让返回键直接退出而不是回到同一视图 */
+function openFromHash(){
+  const h = location.hash || '';
+  let state = null;
+  let m;
+  if ((m = /^#repo=(.+)$/.exec(h))) state = { v: 'repo', name: decodeURIComponent(m[1]) };
+  else if ((m = /^#mention=(.+)$/.exec(h))) state = { v: 'mention', id: decodeURIComponent(m[1]) };
+  else if ((m = /^#topic=(.+)$/.exec(h))) state = { v: 'topic', slug: decodeURIComponent(m[1]) };
+  if (!state) return;
+  try { history.replaceState(state, '', h); } catch(e) {}
+  renderState(state);
+}
+
+loadTabPrefs();
+loadTrCache();
+buildControls();
+initStatsControls();
+loadLangs();
+refresh(false);
+openFromHash();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
