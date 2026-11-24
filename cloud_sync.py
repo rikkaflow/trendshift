@@ -47,6 +47,7 @@ LAT = re.compile(r'[A-Za-z]')
 # 模型偶尔会把条目编号一起回吐（「1. 译文」）。必须剥掉，否则会被当成译文写进 KV。
 # 「.」和「)」后必须跟空白，避免把「3.5 倍提升」切成「5 倍提升」。
 INDEX_PREFIX = re.compile(r'^(?:\d{1,2}[.)]\s+|\d{1,2}、\s*)')
+ORDINARY_WORD = re.compile(r'^[a-z]{3,}$')
 
 def log(*a):
     print(*a, flush=True)
@@ -66,9 +67,15 @@ def is_zh(t):
     # repo 名 / 产品名 / 版本号，翻它只会把专有名词也译坏。
     if len(HAN.findall(t)) > 0:
         return True
-    # 纯专有名词也不必翻：「Visual Studio Code」「Nano vLLM」「SAM 3D Objects」
+    # 纯专有名词也不必翻：「Visual Studio Code」「Nano vLLM」「SAM 3D Objects」。
+    # 判据必须比「单词数 <= 4」更严：那个阈值把「A hive mind communication
+    # platform」「Self-hosted deployment platform」这类正常短句也当成专有名词跳过了，
+    # 于是它们永远进不了云端译表，前端每次刷到都要走实时翻译。
+    # 真正的专有名词没有普通小写单词（camelCase / 首字母大写 / 带数字）。
     words = re.findall(r'[A-Za-z][A-Za-z\-\.]{1,}', t)
-    return len(words) <= 4
+    if len(words) > 4:
+        return False
+    return not any(ORDINARY_WORD.match(w) for w in words)
 
 def strip_index(x):
     m = INDEX_PREFIX.match(x)
@@ -216,8 +223,16 @@ def main():
 
     todo = [t for t in texts if t not in table]
     log('3/5 新增 %d 条' % len(todo))
-    if not todo:
+    if not todo and not dirty:
         log('无新增，结束（%.1fs）' % (time.time() - t0))
+        return 0
+    if not todo:
+        # 只有脏数据要清：直接写回，不要因为「没有新文本」把清理结果丢掉
+        log('5/5 写回清理后的译表')
+        if not kv_put('tr.json', table):
+            log('    写入失败')
+            return 1
+        log('完成：清理 %d 条，总 %d 条，用时 %.0fs' % (len(dirty), len(table), time.time() - t0))
         return 0
 
     # 打包
