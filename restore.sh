@@ -18,7 +18,7 @@ if [ -z "$DEST" ]; then
 fi
 
 if [ "$MODE" = "bundle" ]; then
-  BUNDLE="$HERE/trendshift-v5.bundle"
+  BUNDLE="$HERE/trendshift-v6.bundle"
   [ -f "$BUNDLE" ] || { echo "找不到 $BUNDLE" >&2; exit 1; }
   echo "→ 从 bundle 恢复"
   git clone -q "$BUNDLE" "$DEST"
