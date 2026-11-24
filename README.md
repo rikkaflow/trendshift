@@ -60,6 +60,11 @@ GitHub 趋势榜的手机客户端，以 PWA 形态运行，可"添加到主屏�
 index.html              前端全部逻辑（单文件，无构建步骤）
 worker.template.js      Worker 源码，__ASSETS__ 处会被替换成内联资源
 build_worker.py         打包脚本：把静态文件塞进模板 → /tmp/ts_worker.js
+upload_worker.py        上传（multipart，携带 TR_KV 绑定）
+deploy.sh               打包 + 上传 + 验证一条龙
+cloud_sync.py           云端增量翻译（跑在 GitHub Actions，本地不用管）
+translations.json       译表兜底快照（KV 不可用时由 Worker 内联返回）
+.github/workflows/daily-translate.yml   每日定时任务
 make_icons.py           生成 PNG 图标（Pillow）
 manifest.webmanifest    PWA 清单
 sw.js                   Service Worker（外壳网络优先，API 失败回缓存）
@@ -69,7 +74,48 @@ archive/patches/        历史补丁脚本（已应用，仅作记录）
 
 ---
 
+## 翻译：云端增量，本地零参与
+
+这是本项目的核心设计——**翻译是离线批处理，不是实时功能**。
+
+```
+上游镜像 (quantavil.github.io)
+      │  每天 04:17 UTC，GitHub Actions 拉 3 个 JSON（一次拿全部期次）
+      ▼
+cloud_sync.py ── 抽出所有英文简介 ── 对比 KV 里已有的 ── 只翻新增
+      │            （Gemini lite 多 key 并发，503/429 退避重试）
+      ▼
+Cloudflare KV  key = tr.json
+      │
+      ├─→ Worker /tr.json   → 前端启动时一次拉表，直接查，不发请求
+      └─→ Worker /api/tr    → 表里没有的（新上榜/超长）才实时翻译兜底
+```
+
+**为什么这样设计：**
+
+| 做法 | 问题 |
+|---|---|
+| 每次打开页面实时翻译 | 每屏几十条请求，慢、耗额度、还会因限流降级成英文 |
+| 本地每天跑脚本再上传 | 手机得开机、脚本得维护，机器不在就跑不了 |
+| **云端增量（当前）** | 本地完全不管；只翻新增；追加数据不重新部署代码 |
+
+**关键：代码与数据解耦。** 译表存 KV，不在 Worker 脚本里。加几十条译文只写 KV（几百毫秒），不用重新上传 589 KB 脚本，也不会因为构建失败导致线上停更。
+
+**日常你什么都不用做。** 想手动补一次：
+
+```bash
+gh workflow run daily-translate -R rikkaflow/trendshift
+# 或直接调脚本（本地临时跑，等价于云端行为）
+GEMINI_KEYS=... python3 cloud_sync.py
+```
+
+**首次初始化**（换账号 / 换 KV 时才需要）：把 `translations.json` 写进 KV，key 用 `tr.json`。
+
+---
+
 ## 修改与部署
+
+> **只有改代码才需要部署。** 日常译文更新由 GitHub Actions 自动写 KV，不涉及部署。
 
 ### 改前端
 
@@ -77,32 +123,11 @@ archive/patches/        历史补丁脚本（已应用，仅作记录）
 
 ```bash
 cd /var/minis/shared/trendshift-lite/src
-python3 build_worker.py
-# 产物在 /tmp/ts_worker.js
+./deploy.sh              # 打包 + 上传 + 验证
+./deploy.sh --dry-run    # 只打包，产物在 /tmp/ts_worker.js
 ```
 
-### 部署
-
-```bash
-cd /var/minis/shared/trendshift-lite/src
-python3 build_worker.py && python3 - <<'PY'
-import os, urllib.request
-tok = os.environ['CF_API_TOKEN']; acc = os.environ['CF_ACCOUNT_ID']
-body = open('/tmp/ts_worker.js', 'rb').read()
-url = f"https://api.cloudflare.com/client/v4/accounts/{acc}/workers/scripts/trendshift-lite"
-req = urllib.request.Request(url, data=body, method='PUT',
-    headers={'Authorization': 'Bearer ' + tok,
-             'Content-Type': 'application/javascript'})
-print(urllib.request.urlopen(req, timeout=90).status, 'deployed')
-PY
-```
-
-部署后验证：
-
-```bash
-curl -s https://trendshift-lite.logos7313.workers.dev/health
-curl -s "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=all&limit=3"
-```
+`deploy.sh` 内部走 `upload_worker.py`（multipart）。**不要用单文件 PUT** —— 那样会丢掉 `TR_KV` 绑定，译表链路静默失效。
 
 ### 环境变量
 
@@ -110,6 +135,9 @@ curl -s "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=a
 |---|---|
 | `CF_API_TOKEN` | Cloudflare API token（Workers 编辑权限） |
 | `CF_ACCOUNT_ID` | Cloudflare 账号 ID |
+| `TR_KV_ID` | KV 命名空间 ID（默认已写死在 `upload_worker.py`） |
+
+GitHub Actions 需要同名 secrets：`CF_ACCOUNT_ID` / `CF_API_TOKEN` / `TR_KV_ID` / `GEMINI_KEYS`。
 
 ---
 
@@ -118,7 +146,7 @@ curl -s "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=a
 - **洞察（Insights / Fragmentation Index）未实现**：官方这个页面的数据既不在 API 里，也不在服务端渲染的 HTML/RSC 里，是前端现算的。要复现得自己重跑他们的算法。
 - **主题 / 热门 / 开发者依赖页面结构**：这三块解析的是官方页面的 Next.js RSC 载荷，**官方改版可能失效**，届时需要重新适配 `rscText()` + `findOne()` 的判据。
 - **数据延迟最多一天**：第三方镜像每日 20:17 UTC 同步一次。
-- **翻译依赖 Google 免费端点**：无 SLA，限流时会保留英文原文。MyMemory 备用源的免费额度已耗尽。
+- **翻译分两层**：①**预翻译表**（主力）——云端每天把全部英文简介离线翻好存进 Cloudflare KV，前端启动时一次拉 `/tr.json` 直接查表，命中就不发任何请求；②**实时兜底**——表里没有的（新上榜、超长推文）才走 `/api/tr`，Worker 用 Gemini lite 多 key 翻译。Gemini 免费档无 SLA，503/429 时会保留英文原文。
 - **官方 API 用不了**：`api.trendshift.io` 需要 `ts_live_` 开头的付费 key。
 
 ---
@@ -128,8 +156,10 @@ curl -s "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=a
 1. **Worker 必须用 `addEventListener('fetch', ...)`**，不能 `export default`——上传报 `Uncaught SyntaxError: Unexpected token 'export'`（错误码 10021）。
 2. **首次部署后要开子域**：`POST /accounts/{acc}/workers/scripts/{name}/subdomain` body `{"enabled":true}`，否则 workers.dev 返回 `error code: 1042`。
 3. **RSC 数据全嵌在数组里**：遍历时必须往下钻数组，但判定只能在 dict 上做。第一版跳过了数组元素，一个数据都找不到。
-4. **翻译必须走客户端**：Worker 出口请求 Google 翻译返回空字符串（`{"zh":[""]}`），浏览器直连正常。
-5. **翻译要逐条请求**：批量时用 `\n` 拼多段，但推文正文本身含换行，拆回来对不齐，整批失败。
+4. **Worker 出口请求 Google 翻译返回空字符串**：`{"zh":[""]}`，浏览器直连正常——所以翻译改由 Worker 调 Gemini API（带 key），不依赖 IP。
+5. **批量翻译不能用 `\n` 拼多段**：推文正文本身含换行，拆回来对不齐，整批失败。改用 `<|SPLIT|>` 标记；仍对不齐就把批次对半拆开重试（`cloud_sync.py`）。
+6. **service-worker 格式的绑定必须手动聚合**：`addEventListener('fetch')` 里 KV / secret 都是独立全局常量，不塞进 `env` 对象就永远读不到（`env.TR_KV` 为 undefined）。同一个坑在 Gemini key 上踩过一次，KV 上又踩一次。
+7. **单文件 PUT 无法携带 KV 绑定**：必须走 `multipart/form-data`（metadata 段 + script 段），见 `upload_worker.py`。用普通 PUT 上传会把绑定弄丢，前端静默退化成实时翻译。
 6. **`fixed` 全屏层在 Android WebView 上可能整层不绘制**：改成文档流互斥切换（`body.detail` 时隐藏 header/main/footer）才稳定。
 7. **所有跳转必须压历史栈**：否则 Android 手势返回会直接退出应用。统一走 `go(state)`。
 8. **不要直接链 `x.com`**：会触发系统「在应用中查看此帖子」弹窗，网页端无法禁用。用复制链接代替。
@@ -147,3 +177,4 @@ curl -s "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=a
 | v5 | 统一路由（返回行为一致）；去 X 跳转弹窗；标题即 GitHub 链接 |
 | v6 | 榜单无限滚动（滚到底加载更早期次）；一键部署/恢复脚本；备份体系 |
 | v6.1 | 顶栏期次选择器跟随滚动自动切换 |
+| v6.5 | **预翻译表 + 云端增量**：全站简介离线翻好存 KV，前端直接查表；GitHub Actions 每天自动抓增量、翻译、写 KV，本地无需参与 |
