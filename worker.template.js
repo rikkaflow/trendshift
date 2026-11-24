@@ -73,7 +73,7 @@ function memSet(key, text, ttl) {
    译表由 GitHub Actions 每天定时生成并写入 KV，Worker 只读。
    好处：追加几十条译文不需要重新部署 587 KB 的脚本，代码与数据解耦。
    isolate 内缓存 5 分钟，避免每个请求都读一次 KV（KV 读有延迟但很快）。 */
-const memKvTr = { t: 0, table: null };
+const memKvTr = { t: 0, table: null, raw: '' };
 const KV_TR_TTL = 300;   // 秒
 
 async function kvTrTable(env) {
@@ -85,6 +85,9 @@ async function kvTrTable(env) {
     if (!raw) return null;
     const t = JSON.parse(raw);
     memKvTr.table = t;
+    /* 原文也留着：/tr.json 直接吐 raw 字符串，省掉「parse 成对象再 stringify」
+       的整趟 CPU（免费版 10ms 上限，1.9 MB 级别的表往返很贵）。 */
+    memKvTr.raw = raw;
     memKvTr.t = now;
     return t;
   } catch (e) {
@@ -176,7 +179,14 @@ async function rscText(path, ctx, ttl = CACHE_TTL) {
       cf: { cacheTtl: ttl, cacheEverything: true },
     });
     if (!r.ok) throw new Error('rsc ' + path + ' ' + r.status);
-    return await r.text();
+    const body = await r.text();
+    /* 200 不等于内容正确：Cloudflare 质询页 / 5xx 降级页都是 text/html，
+       rscObjects() 会静默返回 []，然后空结果被缓存 6 小时（整站数据「静默变空」）。
+       先校验它确实像 RSC 流（`<hex id>:<json>`）再进缓存。 */
+    if (!body || !/^[0-9a-f]+:/m.test(body)) {
+      throw new Error('rsc malformed ' + path + ' ' + (r.headers.get('content-type') || '?'));
+    }
+    return body;
   }, ctx);
   const text = await res.text();
   memSet(mk, text, ttl);
@@ -240,9 +250,7 @@ const unox = v => (v === '$undefined' || v === null || v === undefined) ? '' : v
 async function tsJson(path, ctx, ttl = 3600) {
   const mk = 'ts:' + path;
   const mem = memGet(mk);
-  if (mem) return new Response(mem, {
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+  if (mem) return new Response(mem, { headers: jsonHeaders(ttl) });
   const res = await cached('https://ts.internal/api/' + path, ttl, async () => {
     const r = await fetch(TS + path, {
       headers: { 'user-agent': UA, accept: 'application/json' },
@@ -253,17 +261,23 @@ async function tsJson(path, ctx, ttl = 3600) {
   }, ctx);
   const text = await res.text();
   memSet(mk, text, ttl);
-  return new Response(text, {
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+  return new Response(text, { headers: jsonHeaders(ttl) });
+}
+
+/* JSON 代理响应的统一头：漏了 cache-control 会让边缘缓存按默认策略走，
+   漏了 CORS 会让浏览器直连的自建客户端读不到 body。 */
+function jsonHeaders(maxAge) {
+  return {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'public, max-age=' + maxAge,
+    'access-control-allow-origin': '*',
+  };
 }
 
 /* 热议：原站公开接口无 CORS，靠 Worker 代理 */
 async function mentions(ctx) {
   const mem = memGet('mentions');
-  if (mem) return new Response(mem, {
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+  if (mem) return new Response(mem, { headers: jsonHeaders(300) });
   const res = await cached('https://ts.internal/mentions', 300, async () => {
     const r = await fetch(TS + '/api/social-mentions/latest', {
       headers: { 'user-agent': UA, accept: 'application/json' },
@@ -281,9 +295,7 @@ async function mentions(ctx) {
   }, ctx);
   const text = await res.text();
   memSet('mentions', text, 300);
-  return new Response(text, {
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+  return new Response(text, { headers: jsonHeaders(300) });
 }
 
 /* ---------- Groq 翻译（主通道） ----------
@@ -308,6 +320,8 @@ function stripIndex(x) {
 const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest'];
 const GEMINI_RPM = 10;
 const TR_MAX_ITEMS = 40;   // 单次翻译条目上限（前端按字符预算打包，通常 10~25 条）
+const TR_MAX_CHARS = 4000; // 单条文本上限（简介/推文都在 2000 以内）
+const TR_MAX_TOTAL = 20000; // 单次请求总字符预算
 
 function geminiKeys(env) {
   const raw = (env && (env.GEMINI_KEYS || env.GEMINI_API_KEY)) || '';
@@ -371,7 +385,13 @@ async function geminiTranslate(texts, keys) {
         break;
       }
       if (r.status === 404) { lastErr = new Error('gemini 404 ' + model); continue; }
-      if (!r.ok) { lastErr = new Error('gemini ' + r.status); break; }
+      if (!r.ok) {
+        lastErr = new Error('gemini ' + r.status);
+        /* 5xx = 模型过载/临时故障，换下一个模型通常能救回来（cloud_sync 同款退避）；
+           4xx（401 无效 key / 400 请求错）换模型没有意义。 */
+        if (r.status >= 500) continue;
+        break;
+      }
 
       const d = await r.json();
       const cand = (d.candidates && d.candidates[0]) || {};
@@ -440,23 +460,30 @@ async function api(url, ctx, env, request) {
     } else {
       raw = (p.get('t') || '').split('\u0001');
     }
-    raw = raw.filter(Boolean).slice(0, TR_MAX_ITEMS);
-    if (!raw.length) return json({ zh: [] }, 60);
-
+    /* ★ 返回数组长度必须与请求条数严格相等：前端用 d.zh.length === texts.length
+       校验对齐，少一个槽就会整批判为失败并熔断 15~60 秒。
+       所以超限的条目只能留空槽，不能过滤掉。 */
+    const n = Math.min(raw.length, TR_MAX_ITEMS);
+    let budget = TR_MAX_TOTAL;
+    const zh = new Array(n).fill('');
+    const missing = [];
     const keys = geminiKeys(env);
     const hasGroq = !!(env && env.GROQ_API_KEY);
     if (!keys.length && !hasGroq) return json({ error: 'no key', zh: [] }, 60, 503);
 
-    const zh = new Array(raw.length).fill('');
-    const missing = [];
     /* 先查 KV 里的预翻译表（云端每天增量生成），再退到 isolate 缓存 */
     const kvTable = await kvTrTable(env);
-    for (let i = 0; i < raw.length; i++) {
-      const pre = kvTable ? kvTable[raw[i]] : null;
+    for (let i = 0; i < n; i++) {
+      const src0 = String(raw[i] || '');
+      if (!src0) continue;
+      const pre = kvTable ? kvTable[src0] : null;
       if (pre) { zh[i] = pre; continue; }
-      const hit = trGet(raw[i]);
-      if (hit) zh[i] = hit;
-      else missing.push(i);
+      const hit = trGet(src0);
+      if (hit) { zh[i] = hit; continue; }
+      /* 单条过长 / 总量超预算：留空槽，前端会走兜底，不会误判对齐失败 */
+      if (src0.length > TR_MAX_CHARS || budget < src0.length) continue;
+      budget -= src0.length;
+      missing.push(i);
     }
     if (!missing.length) return json({ zh, src: 'cache' }, 86400);
 
@@ -483,7 +510,8 @@ async function api(url, ctx, env, request) {
     } catch (e) {
       const msg = String((e && e.message) || e);
       const partial = zh.some(Boolean);
-      if (partial) return json({ zh, src, error: msg }, 86400);
+      /* 部分失败不能缓存：空槽位被边缘缓存 24 小时，用户整天看到同一批没翻的条目 */
+      if (partial) return json({ zh, src, error: msg }, 0);
       /* 把 429 如实透传，前端才能走短退避而不是一律 60 秒 */
       const code = /429/.test(msg) ? 429 : 502;
       return json({ error: msg, zh: [] }, 0, code);
@@ -563,7 +591,42 @@ async function api(url, ctx, env, request) {
 
   /* --- 趋势榜（第三方镜像） --- */
   const tf = p.get('tf') || 'daily';
-  if (!TFS.has(tf)) return json({ error: 'bad tf' }, 0, 400);
+  /* tf=all 只对 /api/repo 有意义：从主题/热门/开发者等页面进详情时，
+     调用方不知道这个仓库上的是哪个榜，不能硬回退成 weekly。 */
+  if (!TFS.has(tf) && !(tf === 'all' && path === '/api/repo')) {
+    return json({ error: 'bad tf' }, 0, 400);
+  }
+
+  if (path === '/api/repo') {
+    const name = (p.get('name') || '').toLowerCase();
+    if (!name) return json({ error: 'name required' }, 0, 400);
+    /* 依次找第一个有记录的榜单。只返回单个 tf 的 series：
+       不同榜单的期次键格式不同（2026-W48 / 2026-11-25 / 2026-11），
+       混在一起排序没有意义，前端走势图也会乱。 */
+    const order = tf === 'all' ? ['weekly', 'daily', 'monthly', 'yearly'] : [tf];
+    for (const src of order) {
+      let data;
+      try { data = await allData(src, ctx); } catch (e) { continue; }
+      const series = [];
+      let latestHit = null;               // 最近一次上榜的条目（不一定是最新一期）
+      for (const k of data.periods.slice().reverse()) {   // 从最早期次往最新走
+        const hit = (data.g.get(k) || []).find(e => e.full_name.toLowerCase() === name);
+        if (hit) {
+          series.push({ p: k, r: hit.rank, g: hit.stars_gained, s: hit.stars_total, sc: hit.score });
+          latestHit = hit;
+        }
+      }
+      if (series.length) {
+        return json({
+          name, appeared: true, tf: src, series,
+          latest: latestHit ? slim(latestHit) : null,
+          best: Math.min(...series.map(x => x.r)),
+          periods: series.length,
+        }, 600);
+      }
+    }
+    return json({ name, series: [], appeared: false, tf }, 300, 404);
+  }
 
   const data = await allData(tf, ctx);
   const rows = data.rows, g = data.g, periods = data.periods;
@@ -579,27 +642,6 @@ async function api(url, ctx, env, request) {
   const noFilter = !lang || lang === 'all';
   // 无筛选时直接用预计算好的 g / periods，避免每次请求重跑 groupBy + 排序
   const langRows = noFilter ? rows : rows.filter(e => (e.language || 'Unknown') === lang);
-
-  if (path === '/api/repo') {
-    const name = (p.get('name') || '').toLowerCase();
-    if (!name) return json({ error: 'name required' }, 0, 400);
-    const series = [];
-    let latestHit = null;                 // 最近一次上榜的条目（不一定是最新一期）
-    for (const k of periods.slice().reverse()) {   // 从最早期次往最新走
-      const hit = (g.get(k) || []).find(e => e.full_name.toLowerCase() === name);
-      if (hit) {
-        series.push({ p: k, r: hit.rank, g: hit.stars_gained, s: hit.stars_total, sc: hit.score });
-        latestHit = hit;                  // 循环结束即最新一期命中（或最后一次命中）
-      }
-    }
-    if (!series.length && !latestHit) return json({ name, series: [], appeared: false }, 300, 404);
-    return json({
-      name, appeared: true, series,
-      latest: latestHit ? slim(latestHit) : null,
-      best: series.length ? Math.min(...series.map(x => x.r)) : null,
-      periods: series.length, tf,
-    }, 600);
-  }
 
   if (path === '/api/search') {
     const q = (p.get('q') || '').trim().toLowerCase();
@@ -660,13 +702,21 @@ async function handle(request, event, env) {
       headers: {
         'access-control-allow-origin': '*',
         'access-control-allow-headers': '*',
+        'access-control-allow-methods': 'GET, POST, OPTIONS',
         'access-control-max-age': '86400',
       },
     });
   }
   if (url.pathname === '/health') {
     return json({
-      ok: true, v: 3, paths: Object.keys(SHELL),
+      ok: true, v: 4, paths: Object.keys(SHELL),
+      /* 部署后自检用：secret 绑定丢失时 /api/tr 会 503，
+         但旧版 deploy.sh 只验 health/list/tr.json 三项，看不出问题。 */
+      bindings: {
+        kv: !!(env && env.TR_KV),
+        gemini: !!(env && (env.GEMINI_KEYS || env.GEMINI_API_KEY)),
+        groq: !!(env && env.GROQ_API_KEY),
+      },
       api: ['/api/list', '/api/langs', '/api/periods', '/api/search', '/api/repo',
         '/api/topics', '/api/topic', '/api/ghtrending', '/api/devs', '/api/stats', '/api/mentions'],
     });
@@ -683,7 +733,7 @@ async function handle(request, event, env) {
     /* 优先返回 KV 里的最新译表（云端每天更新），KV 不可用时回落到内联快照 */
     const t = await kvTrTable(env);
     if (t) {
-      return new Response(JSON.stringify(t), {
+      return new Response(memKvTr.raw || JSON.stringify(t), {
         headers: {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'public, max-age=1800',
@@ -705,10 +755,13 @@ async function handle(request, event, env) {
     payload = buf;
   }
   const isIcon = url.pathname.startsWith('/icon');
+  /* HTML 外壳必须 no-cache：给 300s 的话，5 分钟内连续部署时浏览器 HTTP 缓存
+     会先把旧 index.html 交出去，SW 的网络优先也救不回来（它拿到的就是旧的）。 */
+  const isHtml = hit.type.startsWith('text/html');
   return new Response(request.method === 'HEAD' ? null : payload, {
     headers: {
       'content-type': hit.type,
-      'cache-control': url.pathname === '/sw.js' ? 'no-cache'
+      'cache-control': isHtml || url.pathname === '/sw.js' ? 'no-cache'
         : isIcon ? 'public, max-age=86400'
         : url.pathname === '/tr.json' ? 'public, max-age=86400' : 'public, max-age=300',
       'x-content-type-options': 'nosniff',

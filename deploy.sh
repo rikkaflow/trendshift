@@ -28,7 +28,7 @@ fi
 
 # 必须走 multipart 上传：单文件 PUT 无法携带 TR_KV 绑定，
 # 会把 KV 译表读取整条链路弄断（前端退化成实时翻译）。
-echo "→ 上传到 Cloudflare（携带 TR_KV 绑定）"
+echo "→ 上传到 Cloudflare（携带 TR_KV 绑定 + 保留 secret）"
 python3 upload_worker.py
 
 echo "→ 验证"
@@ -40,6 +40,15 @@ if ! curl -sf --noproxy '*' -m 25 "$B/health" -o /tmp/_h.json; then
 fi
 if ! grep -q '"ok":true' /tmp/_h.json; then
   echo "✗ /health 返回内容异常" >&2; cat /tmp/_h.json; exit 1
+fi
+# 绑定自检：上传时漏了 keep_bindings 会把 GEMINI_KEYS / GROQ_API_KEY 抹掉，
+# 此时 /health、/api/list、/tr.json 全部照常 200，只有 /api/tr 静默变 503。
+if ! grep -q '"kv":true' /tmp/_h.json; then
+  echo "✗ /health：TR_KV 绑定丢失" >&2; cat /tmp/_h.json; exit 1
+fi
+if ! grep -q '"gemini":true' /tmp/_h.json; then
+  echo "✗ /health：GEMINI key 未绑定（上传覆盖了 secret？检查 keep_bindings）" >&2
+  cat /tmp/_h.json; exit 1
 fi
 if ! curl -sf --noproxy '*' -m 30 "$B/api/list?tf=weekly&lang=all&limit=2" -o /tmp/_l.json; then
   echo "✗ /api/list 检查失败" >&2; exit 1
@@ -55,4 +64,24 @@ N=$(python3 -c "import json;print(len(json.load(open('/tmp/_t.json'))))")
 if [ "$N" -lt 1000 ]; then
   echo "✗ 译表条目异常：$N" >&2; exit 1
 fi
-echo "✓ 完成：$B/  （译表 $N 条）"
+
+# 翻译链路端到端：拿译表里已存在的一条原文去请求，必须命中 KV（src=cache），
+# 这样既能证明「密钥在 + KV 绑定在」，又不会消耗 Gemini 额度。
+python3 - <<'PY'
+import json
+tr = json.load(open('/tmp/_t.json'))
+k = next(iter(tr))
+open('/tmp/_trreq.json', 'w', encoding='utf-8').write(
+    json.dumps({'texts': [k]}, ensure_ascii=False))
+PY
+if ! curl -sf --noproxy '*' -m 30 -X POST "$B/api/tr" \
+     -H 'content-type: application/json' --data-binary @/tmp/_trreq.json -o /tmp/_trres.json; then
+  echo "✗ /api/tr 检查失败（密钥丢失或 KV 不可用）" >&2
+  head -c 300 /tmp/_trres.json 2>/dev/null || true
+  exit 1
+fi
+if ! grep -q '"src":"cache"' /tmp/_trres.json; then
+  echo "✗ /api/tr 未命中 KV 译表" >&2; head -c 300 /tmp/_trres.json; exit 1
+fi
+
+echo "✓ 完成：$B/  （译表 $N 条，翻译链路 OK）"

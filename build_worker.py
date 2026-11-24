@@ -80,3 +80,65 @@ if dups:
     print('✗ 顶层重复声明（会导致 SyntaxError）：%s' % dups, file=sys.stderr)
     sys.exit(1)
 print('✓ 无顶层重复声明')
+
+# ---- 判据一致性门：前端 isChinese() 必须与云端 cloud_sync.is_zh() 逐条一致 ----
+# 2026-11-25：两侧判据不同（前端 han >= latin，云端含汉字即中文）时，
+# 云端跳过的条目会在前端每次刷新都被送去实时翻译，白耗 Gemini 额度、首屏变慢，
+# 而两边各自看起来都「没问题」。判据只有一份语义，就只该有一处实现。
+def check_zh_parity():
+    import importlib.util
+    if not node:
+        print('! 未安装 node，跳过判据一致性检查')
+        return
+    sys.path.insert(0, str(SRC))
+    spec = importlib.util.spec_from_file_location('cloud_sync', SRC / 'cloud_sync.py')
+    cs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cs)
+
+    m = re.search(r'const CJK = [^\n]+\n', html)
+    m2 = re.search(r'const KANA = [^\n]+\n', html)
+    m3 = re.search(r'const HANGUL = [^\n]+\n', html)
+    m4 = re.search(r'function isChinese\(t\)\{[\s\S]*?\n\}', html)
+    if not (m and m2 and m3 and m4):
+        print('✗ 无法从 index.html 提取 isChinese()/CJK/KANA/HANGUL', file=sys.stderr)
+        sys.exit(1)
+
+    samples = [
+        'Visual Studio Code', 'SAM 3D Objects', 'Nano vLLM', 'GitHub Agentic Workflows',
+        'A hive mind communication platform', 'Self-hosted deployment platform',
+        'A lightweight recommendation system for cold start users',
+        'MCP for xiaohongshu.com', 'eBPF-based security platform', 'Agent skills',
+        '一键将 Markdown 粘贴到 Word', '中文混排 with English words here',
+        '日本語のツール', '한국어 도구', 'Fast Python web framework',
+        'Open source CRM', 'A Tiny biped duck robot 🦆', 'Linux kernel source tree',
+        'A modern alternative to ls', 'The open-source CapCut alternative',
+    ]
+    probe = pathlib.Path('/tmp/_zh_parity.json')
+    probe.write_text(json.dumps([{'t': t, 'zh': bool(cs.is_zh(t))} for t in samples],
+                                ensure_ascii=False), encoding='utf-8')
+    js_path = pathlib.Path('/tmp/_zh_parity.js')
+    js_path.write_text(
+        "const fs=require('fs');\n"
+        "const html=fs.readFileSync(%r,'utf8');\n" % str(SRC / 'index.html') +
+        "const pick=(re,n)=>{const m=html.match(re);if(!m)throw new Error('extract '+n);return m[0];};\n"
+        "const code=pick(/const CJK = [^\\n]+\\n/,'CJK')"
+        "+pick(/const KANA = [^\\n]+\\n/,'KANA')"
+        "+pick(/const HANGUL = [^\\n]+\\n/,'HANGUL')"
+        "+pick(/function isChinese\\(t\\)\\{[\\s\\S]*?\\n\\}/,'isChinese');\n"
+        "const sb={};new Function('sb',code+'sb.f=isChinese;')(sb);\n"
+        "const rows=JSON.parse(fs.readFileSync('/tmp/_zh_parity.json','utf8'));\n"
+        "const bad=rows.filter(r=>sb.f(r.t)!==r.zh);\n"
+        "if(bad.length){console.error('✗ 前后端中文判据不一致 '+bad.length+' 条:');"
+        "for(const b of bad.slice(0,5))console.error('   '+JSON.stringify(b.t)+' py='+b.zh+' js='+sb.f(b.t));"
+        "process.exit(1);}\n"
+        "console.log('✓ 前后端中文判据一致（'+rows.length+' 条样本）');\n",
+        encoding='utf-8')
+
+    r = subprocess.run([node, str(js_path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print((r.stderr or r.stdout).strip(), file=sys.stderr)
+        sys.exit(1)
+    print((r.stdout or '').strip())
+
+
+check_zh_parity()
