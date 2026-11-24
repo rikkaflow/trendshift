@@ -271,18 +271,42 @@ function pruneSnapshots(){
   try {
     const keys = Object.keys(localStorage).filter(k => k.startsWith('ts:last:'));
     if (keys.length <= KEEP_SNAPSHOTS) return;
-    // 按写入时间粗排：用 key 名字无法判断，直接砍掉多余的（先进先出）
-    keys.slice(0, keys.length - KEEP_SNAPSHOTS).forEach(k => localStorage.removeItem(k));
+    /* 按写入时间淘汰，而不是按 key 顺序：localStorage 的键序规范上不保证是写入顺序
+       （Chrome 是插入序，但这不是契约），拿它当 LRU 可能把刚缓存的常用栏目删掉。
+       每个快照自带 ts 字段（saveSnap 写入），没有 ts 的老快照按 0 处理优先淘汰。 */
+    const withTs = keys.map(k => {
+      let t = 0;
+      try { t = (JSON.parse(localStorage.getItem(k)) || {}).ts || 0; } catch(e) {}
+      return { k, t };
+    }).sort((a, b) => a.t - b.t);
+    withTs.slice(0, withTs.length - KEEP_SNAPSHOTS).forEach(x => localStorage.removeItem(x.k));
   } catch(e) {}
 }
 
+/* 快照键：栏目 + 语言 + 内容维度（搜索词 / 主题 slug / 统计年月）。
+   同一条栏目下的不同内容必须是不同的键，否则会互相覆盖（见 refresh 里的注释）。 */
+function snapKey(s){
+  let k = 'ts:last:' + s.tf + ':' + (s.lang || '');
+  if (s.q) k += ':q=' + s.q;
+  else if (s.tf === 'topics' && s.topicSlug) k += ':topic=' + s.topicSlug;
+  else if (s.tf === 'stats') k += ':ym=' + (st.statYear || '') + '-' + (st.statMonth || '');
+  return k;
+}
+
 /* gh:* 从不清理会慢慢撑爆 5MB 配额，最终 save 兜底把 ts:last 全删光。
-   按写入顺序保留最近 80 个。 */
+   按写入时间保留最近 80 个 —— 每条都存了 {t, v}，直接读 t 排序；
+   旧实现按 Object.keys() 顺序 slice，而 localStorage 键序规范上不保证是写入顺序，
+   可能把刚缓存的常用仓库先删掉。 */
 function pruneGh(){
   try {
     const keys = Object.keys(localStorage).filter(k => k.startsWith('gh:'));
     if (keys.length <= KEEP_GH) return;
-    keys.slice(0, keys.length - KEEP_GH).forEach(k => localStorage.removeItem(k));
+    const withTs = keys.map(k => {
+      let t = 0;
+      try { t = (JSON.parse(localStorage.getItem(k)) || {}).t || 0; } catch(e) {}
+      return { k, t };
+    }).sort((a, b) => a.t - b.t);
+    withTs.slice(0, withTs.length - KEEP_GH).forEach(x => localStorage.removeItem(x.k));
   } catch(e) {}
 }
 
@@ -290,6 +314,8 @@ const save = (key, val) => {
   try {
     if (key.startsWith('ts:last:')) pruneSnapshots();
     else if (key.startsWith('gh:')) pruneGh();
+    /* 快照打上写入时间：pruneSnapshots 靠它做 LRU 淘汰（不能靠 localStorage 键序） */
+    if (key.startsWith('ts:last:') && val && typeof val === 'object' && !val.ts) val.ts = Date.now();
     localStorage.setItem(key, JSON.stringify(val));
   } catch(e) {
     // 配额满了：清掉快照再试一次
@@ -915,10 +941,14 @@ async function refresh(force){
     }
     // 慢请求返回时用户可能已切栏目：丢弃，且不能写进别的栏目的缓存
     if (token !== st.refreshToken) return;
-    save('ts:last:' + snap.tf + ':' + snap.lang, st.data);
+    /* ★ 快照键必须区分「同一栏目下的不同内容」：搜索词、主题二级页、统计月份。
+       旧键只有 tf:lang，于是「在 weekly 里搜一次关键字」会把 weekly 的离线快照
+       覆盖成搜索结果；断网再进 weekly 看到的是上次搜索的结果。
+       主题二级页同理（全部主题 vs 某个主题是两份完全不同的内容）。 */
+    save(snapKey(snap), st.data);
   } catch (e) {
     if (token !== st.refreshToken) return;
-    const cached = read('ts:last:' + snap.tf + ':' + snap.lang);
+    const cached = read(snapKey(snap));
     if (cached && !cached.error) {
       st.data = cached;
       // 离线恢复必须同步重建分页，否则 renderBoard 只看到空 pages 就停在骨架屏
