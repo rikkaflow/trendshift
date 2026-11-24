@@ -1,4 +1,13 @@
-const CACHE = 'trendshift-v4';
+const CACHE = 'trendshift-v5';
+
+/* 弱网/假连接时 fetch 可能长时间不返回，用户会被卡在骨架屏 */
+function withTimeout(promise, ms){
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('sw timeout')), ms);
+    promise.then(v => { clearTimeout(t); resolve(v); },
+                 e => { clearTimeout(t); reject(e); });
+  });
+}
 const SHELL = ['./', './index.html', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png'];
 
@@ -36,9 +45,19 @@ self.addEventListener('fetch', e => {
   }
 
   /* API：网络优先，失败回缓存（离线看上次内容） */
+  /* 翻译请求不缓存：URL/POST body 里的文本组合近乎无限，
+     而且前端 localStorage 已经存了译文，再进 Cache Storage 只会无限膨胀 */
+  if (url.pathname.startsWith('/api/tr')) {
+    e.respondWith(withTimeout(fetch(req), 20000).catch(() =>
+      new Response('{"error":"timeout","zh":[]}', {
+        status: 503, headers: { 'content-type': 'application/json; charset=utf-8' },
+      })));
+    return;
+  }
+
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(
-      fetch(req).then(r => {
+      withTimeout(fetch(req), 15000).then(r => {
         // 只缓存成功响应：502/400 存进去会让离线时读出报错
         if (r.ok) {
           const cp = r.clone();

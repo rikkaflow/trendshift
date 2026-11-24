@@ -47,8 +47,12 @@ const memData = new Map();     // tf -> { t, rows, g, periods, langs }
 const inflight = new Map();    // tf -> Promise
 /* 非榜单数据的实例内缓存。workers.dev 上 caches.default 是 no-op，
    没有这层的话「热议/主题/热门/开发者/统计」每次都回源 trendshift.io。 */
-const memText = new Map();     // key -> { t, text }
+const memText = new Map();     // RSC / 接口 / 热议：key -> { t, text, ttl }
 const MEM_MAX = 40;            // 上限，防 128MB 内存溢出
+/* 译文单独一个 Map：一次浏览两屏就有 50 条简介，
+   和 RSC 共用 40 条上限会把 topics/devs/mentions 全挤掉，导致反复回源 */
+const memTr = new Map();
+const MEM_TR_MAX = 2000;
 
 function memGet(key) {
   const hit = memText.get(key);
@@ -63,6 +67,44 @@ function memSet(key, text, ttl) {
     if (first) memText.delete(first);
   }
   memText.set(key, { t: Date.now(), text, ttl });
+}
+
+/* ---------- 云端增量译表（KV） ----------
+   译表由 GitHub Actions 每天定时生成并写入 KV，Worker 只读。
+   好处：追加几十条译文不需要重新部署 587 KB 的脚本，代码与数据解耦。
+   isolate 内缓存 5 分钟，避免每个请求都读一次 KV（KV 读有延迟但很快）。 */
+const memKvTr = { t: 0, table: null };
+const KV_TR_TTL = 300;   // 秒
+
+async function kvTrTable(env) {
+  if (!env || !env.TR_KV) return null;
+  const now = Date.now();
+  if (memKvTr.table && now - memKvTr.t < KV_TR_TTL * 1000) return memKvTr.table;
+  try {
+    const raw = await env.TR_KV.get('tr.json', { type: 'text', cacheTtl: 300 });
+    if (!raw) return null;
+    const t = JSON.parse(raw);
+    memKvTr.table = t;
+    memKvTr.t = now;
+    return t;
+  } catch (e) {
+    return memKvTr.table;   // 读失败用旧表，别让翻译整条挂掉
+  }
+}
+
+/* 译文专用读写，和 memText 隔离 */
+function trGet(k) {
+  const hit = memTr.get(k);
+  if (!hit) return null;
+  if (Date.now() - hit.t > hit.ttl * 1000) { memTr.delete(k); return null; }
+  return hit.text;
+}
+function trSet(k, text, ttl) {
+  if (memTr.size >= MEM_TR_MAX) {
+    const first = memTr.keys().next().value;
+    if (first) memTr.delete(first);
+  }
+  memTr.set(k, { t: Date.now(), text, ttl });
 }
 
 function buildData(rows) {
@@ -250,12 +292,22 @@ async function mentions(ctx) {
 const GROQ_MODEL = 'qwen/qwen3.8-27b';     // 非推理模型，token 省、格式稳
 const GROQ_SPLIT = '<|SPLIT|>';
 
+/* 剥掉模型加的序号前缀。必须要求序号后跟空白，
+   否则「3.5 倍提升」会被切成「5 倍提升」、「2026.1 发布」切成「1 发布」。 */
+function stripIndex(x) {
+  /* 顿号在中文里后面不加空格，单独放行；「.」和「)」必须跟空白，
+     否则「3.5 倍提升」会被切成「5 倍提升」 */
+  let m = /^(\d{1,2})[.)]\s+/.exec(x) || /^(\d{1,2})、\s*/.exec(x);
+  return m ? x.slice(m[0].length) : x;
+}
+
 /* ---- Gemini 多 key 轮换 ----
    免费档硬限：单 key 10 RPM / 500 RPD / 250K 上下文。
    单 key 10 RPM 对首屏 25 条明显不够，所以用多 key 轮流发，
    每个 key 各自计数，撞 429 就换下一个，全撞了才降级。 */
 const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest'];
 const GEMINI_RPM = 10;
+const TR_MAX_ITEMS = 40;   // 单次翻译条目上限（前端按字符预算打包，通常 10~25 条）
 
 function geminiKeys(env) {
   const raw = (env && (env.GEMINI_KEYS || env.GEMINI_API_KEY)) || '';
@@ -308,16 +360,26 @@ async function geminiTranslate(texts, keys) {
           { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': UA }, body });
       } catch (e) { lastErr = e; continue; }
 
-      if (r.status === 429) { markHit(k, Date.now()); lastErr = new Error('gemini 429'); break; }
+      if (r.status === 429) {
+        /* 只 push 一条的话 1 < RPM，keyReady 仍然 true，下一个请求还会撞它。
+           直接把窗口填满，这个 key 在一分钟内不会再被优先选中。 */
+        const now2 = Date.now();
+        const arr = (gqHits.get(k) || []).filter(t => now2 - t < 60000);
+        for (let i = arr.length; i < GEMINI_RPM; i++) arr.push(now2);
+        gqHits.set(k, arr);
+        lastErr = new Error('gemini 429');
+        break;
+      }
       if (r.status === 404) { lastErr = new Error('gemini 404 ' + model); continue; }
       if (!r.ok) { lastErr = new Error('gemini ' + r.status); break; }
 
       const d = await r.json();
       const cand = (d.candidates && d.candidates[0]) || {};
       const out = ((cand.content && cand.content.parts) || []).map(x => x.text || '').join('');
-      let parts = out.split(GROQ_SPLIT).map(x => x.trim())
-        .map(x => x.replace(/^\d+[.、)]\s*/, ''));
+      let parts = out.split(GROQ_SPLIT).map(x => x.trim()).map(stripIndex);
       if (parts.length !== texts.length) { lastErr = new Error('gemini align ' + parts.length + '/' + texts.length); continue; }
+      /* 单条时 split 长度恒为 1，空串也能过长度校验 → 必须单独判内容 */
+      if (!parts.some(x => x && x.trim())) { lastErr = new Error('gemini empty'); continue; }
       markHit(k, Date.now());
       return parts;
     }
@@ -353,30 +415,46 @@ async function groqTranslate(texts, key) {
   const out = (d.choices && d.choices[0] && d.choices[0].message &&
     d.choices[0].message.content) || '';
   let parts = out.split(GROQ_SPLIT).map(x => x.trim());
-  // 去掉模型可能加上的序号前缀
-  parts = parts.map(x => x.replace(/^\d+[.、)]\s*/, ''));
+  parts = parts.map(stripIndex);
   if (parts.length !== texts.length) throw new Error('groq align ' + parts.length + '/' + texts.length);
+  if (!parts.some(x => x && x.trim())) throw new Error('groq empty');
   return parts;
 }
 
-async function api(url, ctx, env) {
+async function api(url, ctx, env, request) {
   const p = url.searchParams;
   const path = url.pathname;
 
   if (path === '/api/mentions') return await mentions(ctx);
 
-  /* 翻译代理：Groq 优先（key 存 Worker secret，不进前端）。
-     ★ 译文缓存是刚需：免费额度只有 8000 token/分钟，
-       不缓存的话每次刷新都重翻，几分钟就打满。 */
+  /* 翻译代理：Gemini 多 key 优先，Groq 备用（key 都在 Worker secret）。
+     ★ 译文缓存是刚需：免费额度按分钟计，不缓存的话每次刷新都重翻。
+     ★ 支持 POST {texts:[...]}，避免长文本把 GET URL 撑到几 KB。 */
   if (path === '/api/tr') {
-    const raw = (p.get('t') || '').split('\u0001').filter(Boolean).slice(0, 30);
+    let raw = [];
+    if (request.method === 'POST') {
+      try {
+        const body = await request.json();
+        if (body && Array.isArray(body.texts)) raw = body.texts.map(x => String(x || ''));
+      } catch (e) { return json({ error: 'bad json', zh: [] }, 0, 400); }
+    } else {
+      raw = (p.get('t') || '').split('\u0001');
+    }
+    raw = raw.filter(Boolean).slice(0, TR_MAX_ITEMS);
     if (!raw.length) return json({ zh: [] }, 60);
-    if (!env) return json({ error: 'no key', zh: [] }, 60);
+
+    const keys = geminiKeys(env);
+    const hasGroq = !!(env && env.GROQ_API_KEY);
+    if (!keys.length && !hasGroq) return json({ error: 'no key', zh: [] }, 60, 503);
 
     const zh = new Array(raw.length).fill('');
     const missing = [];
+    /* 先查 KV 里的预翻译表（云端每天增量生成），再退到 isolate 缓存 */
+    const kvTable = await kvTrTable(env);
     for (let i = 0; i < raw.length; i++) {
-      const hit = memGet('tr:' + raw[i]);
+      const pre = kvTable ? kvTable[raw[i]] : null;
+      if (pre) { zh[i] = pre; continue; }
+      const hit = trGet(raw[i]);
       if (hit) zh[i] = hit;
       else missing.push(i);
     }
@@ -384,24 +462,31 @@ async function api(url, ctx, env) {
 
     let src = 'gemini';
     try {
-      let got;
-      const keys = geminiKeys(env);
-      try {
-        got = await geminiTranslate(missing.map(i => raw[i]), keys);
-      } catch (ge) {
-        src = 'groq';
-        got = await groqTranslate(missing.map(i => raw[i]), env && env.GROQ_API_KEY);
+      let got = null;
+      if (keys.length) {
+        try { got = await geminiTranslate(missing.map(i => raw[i]), keys); }
+        catch (ge) { got = null; }
       }
+      if (!got) {
+        if (!hasGroq) throw new Error('gemini failed, no groq fallback');
+        src = 'groq';
+        got = await groqTranslate(missing.map(i => raw[i]), env.GROQ_API_KEY);
+      }
+      if (!Array.isArray(got)) throw new Error('no translation');
       missing.forEach((idx, n) => {
         const v = got[n];
-        if (v) { zh[idx] = v; memSet('tr:' + raw[idx], v, 30 * 86400); }
+        if (v && v !== raw[idx]) { zh[idx] = v; trSet(raw[idx], v, 30 * 86400); }
       });
+      /* 一条都没翻出来 = 上游异常，别用 200 骗前端 */
+      if (!zh.some(Boolean)) return json({ error: 'all empty', zh: [] }, 0, 502);
       return json({ zh, src }, 86400);
     } catch (e) {
-      // 部分命中也要返回，别让已翻好的白费
+      const msg = String((e && e.message) || e);
       const partial = zh.some(Boolean);
-      return json({ error: String((e && e.message) || e), zh: partial ? zh : [] },
-        0, partial ? 200 : 502);
+      if (partial) return json({ zh, src, error: msg }, 86400);
+      /* 把 429 如实透传，前端才能走短退避而不是一律 60 秒 */
+      const code = /429/.test(msg) ? 429 : 502;
+      return json({ error: msg, zh: [] }, 0, code);
     }
   }
 
@@ -559,11 +644,12 @@ async function api(url, ctx, env) {
 }
 
 addEventListener('fetch', event => {
-  // service-worker 格式：每个 secret 是独立全局常量，这里聚合成对象
+  // service-worker 格式：每个 secret / KV 绑定都是独立全局常量，这里聚合成对象
   const env = {};
   if (typeof GEMINI_KEYS !== 'undefined') env.GEMINI_KEYS = GEMINI_KEYS;
   if (typeof GEMINI_API_KEY !== 'undefined') env.GEMINI_API_KEY = GEMINI_API_KEY;
   if (typeof GROQ_API_KEY !== 'undefined') env.GROQ_API_KEY = GROQ_API_KEY;
+  if (typeof TR_KV !== 'undefined') env.TR_KV = TR_KV;
   event.respondWith(handle(event.request, event, env));
 });
 
@@ -587,10 +673,24 @@ async function handle(request, event, env) {
   }
   if (url.pathname.startsWith('/api/')) {
     try {
-      return await api(url, event, env);
+      return await api(url, event, env, request);
     } catch (e) {
       // 必须用非 2xx：否则前端 api() 放行、sw 缓存错误对象、渲染时 undefined 崩溃
       return json({ error: String((e && e.message) || e) }, 0, 502);
+    }
+  }
+  if (url.pathname === '/tr.json') {
+    /* 优先返回 KV 里的最新译表（云端每天更新），KV 不可用时回落到内联快照 */
+    const t = await kvTrTable(env);
+    if (t) {
+      return new Response(JSON.stringify(t), {
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'public, max-age=1800',
+          'access-control-allow-origin': '*',
+          'x-content-type-options': 'nosniff',
+        },
+      });
     }
   }
   const hit = SHELL[url.pathname] || (url.pathname.endsWith('/') ? SHELL['/'] : null);
@@ -609,7 +709,8 @@ async function handle(request, event, env) {
     headers: {
       'content-type': hit.type,
       'cache-control': url.pathname === '/sw.js' ? 'no-cache'
-        : isIcon ? 'public, max-age=86400' : 'public, max-age=300',
+        : isIcon ? 'public, max-age=86400'
+        : url.pathname === '/tr.json' ? 'public, max-age=86400' : 'public, max-age=300',
       'x-content-type-options': 'nosniff',
     },
   });

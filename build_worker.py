@@ -18,8 +18,17 @@ png192 = base64.b64encode((SRC / 'icon-192.png').read_bytes()).decode()
 png512 = base64.b64encode((SRC / 'icon-512.png').read_bytes()).decode()
 png_mask = base64.b64encode((SRC / 'icon-512-maskable.png').read_bytes()).decode()
 
+# 预翻译表：构建期一次性生成，前端只查表不再实时翻译
+tr_file = SRC / 'translations.json'
+if tr_file.exists():
+    tr_json = tr_file.read_text(encoding='utf-8')
+else:
+    tr_json = '{}'
+    print('警告：translations.json 不存在，前端将退化为实时翻译')
+
 assets = {
     '/': {'body': html, 'type': 'text/html; charset=utf-8'},
+    '/tr.json': {'body': tr_json, 'type': 'application/json; charset=utf-8'},
     '/index.html': {'body': html, 'type': 'text/html; charset=utf-8'},
     '/manifest.webmanifest': {'body': manifest, 'type': 'application/manifest+json; charset=utf-8'},
     '/sw.js': {'body': sw, 'type': 'application/javascript; charset=utf-8'},

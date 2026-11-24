@@ -1,0 +1,60 @@
+name: daily-translate
+
+# 云端每日增量翻译：抓上游 → 找新增 → Gemini 翻译 → 写 Cloudflare KV
+# 本地完全不需要开机，手机不用管。
+#
+# 说明：
+#   * 上游是 quantavil.github.io 的静态镜像，一次请求拿到全部期次，
+#     所以整个任务只有 3 个下载请求 + 若干个翻译请求，几十秒到几分钟。
+#   * 译表存 KV（key = tr.json），Worker 读 KV 返回给前端。
+#     追加译文不会触发 Worker 重新部署，代码与数据解耦。
+#   * 无新增时提前退出，不产生任何翻译开销。
+
+on:
+  schedule:
+    # 每天 04:17 UTC（北京时间 12:17），避开整点拥挤
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略增量判断，强制跑一遍（调试用）'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: daily-translate
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 云端增量翻译
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TR_KV_ID: ${{ secrets.TR_KV_ID }}
+          GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+        run: |
+          set -e
+          python3 -u cloud_sync.py
+
+      - name: 校验线上译表
+        run: |
+          set -e
+          B=https://trendshift-lite.logos7313.workers.dev
+          curl -sf --max-time 60 "$B/tr.json" -o /tmp/tr.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/tr.json'))
+          print('线上译表 %d 条' % len(d))
+          assert len(d) > 1000, '译表条目异常偏少'
+          PY

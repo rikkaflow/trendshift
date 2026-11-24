@@ -253,6 +253,7 @@ function k(n){
   return String(n);
 }
 /* 榜单快照只留最近 6 个，防止筛选组合把配额堆满导致后续写入静默失败 */
+const KEEP_GH = 80;
 const KEEP_SNAPSHOTS = 6;
 function pruneSnapshots(){
   try {
@@ -263,9 +264,20 @@ function pruneSnapshots(){
   } catch(e) {}
 }
 
+/* gh:* 从不清理会慢慢撑爆 5MB 配额，最终 save 兜底把 ts:last 全删光。
+   按写入顺序保留最近 80 个。 */
+function pruneGh(){
+  try {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith('gh:'));
+    if (keys.length <= KEEP_GH) return;
+    keys.slice(0, keys.length - KEEP_GH).forEach(k => localStorage.removeItem(k));
+  } catch(e) {}
+}
+
 const save = (key, val) => {
   try {
     if (key.startsWith('ts:last:')) pruneSnapshots();
+    else if (key.startsWith('gh:')) pruneGh();
     localStorage.setItem(key, JSON.stringify(val));
   } catch(e) {
     // 配额满了：清掉快照再试一次
@@ -325,10 +337,11 @@ async function ghInfo(name){
 /* 批量机翻：浏览器直连 Google（CORS 开放）。
    每条独立请求 + 并发 6：原文本身可能含换行，合并成一批会错位对不齐。
    8s 超时，失败保留原文，绝不阻塞渲染。 */
-function fetchWithTimeout(url, ms){
+function fetchWithTimeout(url, ms, opts){
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), ms);
-  return fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(timer));
+  return fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }))
+    .finally(() => clearTimeout(timer));
 }
 
 /* 翻译链路：Google 批量优先，失败退 MyMemory（单条、配额有限）。
@@ -384,11 +397,22 @@ async function viaMyMemory(text){
 }
 
 /* 单条翻译：Google 优先，失败退 MyMemory */
+let googleDownUntil = 0;
 async function translateOne(text){
   const t = String(text).slice(0, 600);
   if (!t.trim()) return '';
-  if (/[\u4e00-\u9fa5]/.test(t)) return t;        // 已含中文，原样返回（上层会标记）
-  try { const v = await googleOne(t); if (v) return v; } catch(e) {}
+  if (!needsTranslation(t)) return t;             // 已是中文，原样返回
+  /* Google 直连需要 CORS 头，translate.googleapis.com 现在不给（浏览器侧全部被拦），
+     一失败就熔断 10 分钟，否则每条都要白等 8 秒超时。 */
+  if (Date.now() > googleDownUntil) {
+    try {
+      const v = await googleOne(t);
+      if (v) return v;
+      googleDownUntil = Date.now() + 10 * 60 * 1000;
+    } catch(e) {
+      googleDownUntil = Date.now() + 10 * 60 * 1000;
+    }
+  }
   try { return await viaMyMemory(t); } catch(e) { return ''; }
 }
 
@@ -404,18 +428,36 @@ let groqDownUntil = 0;
    把每批做大 → 请求数变少。3000 字符约 900 token，远低于上下文上限。 */
 const GROQ_CHAR_BUDGET = 3000;
 const CJK = /[\u4e00-\u9fa5]/;
+const KANA = /[\u3040-\u30ff]/;     // 日文假名
+const HANGUL = /[\uac00-\ud7af]/;    // 韩文
 
-function needsTranslation(t){ return t && !CJK.test(t); }
+/* 只有「本来就是中文」才跳过翻译。
+   不能只看有没有汉字：日文仓库简介含大量汉字，会被误判成中文而永远不翻。 */
+function isChinese(t){
+  if (!t) return false;
+  if (KANA.test(t) || HANGUL.test(t)) return false;
+  const han = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const latin = (t.match(/[A-Za-z]/g) || []).length;
+  return han > 0 && han >= latin;      // 汉字不少于拉丁字母，才认定是中文
+}
+function needsTranslation(t){ return t && !isChinese(t); }
 
 async function viaWorkerGroq(texts){
   if (Date.now() < groqDownUntil) throw new Error('gq skip');
-  const u = new URL('api/tr', location.href);
-  u.searchParams.set('t', texts.join('\u0001'));
-  let r = await fetchWithTimeout(u, 30000);
+  const payload = JSON.stringify({ texts });
+  let r = await fetchWithTimeout('api/tr', 30000, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: payload,
+  });
   if (r.status === 429) {
-    // 每分钟 token 限额：等 25 秒重试一次，比整轮降级划算
+    // 每分钟 token 限额：等 8 秒重试一次，比整轮降级划算
     await new Promise(x => setTimeout(x, 8000));
-    r = await fetchWithTimeout(u, 30000);
+    r = await fetchWithTimeout('api/tr', 30000, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload,
+    });
   }
   if (!r.ok) {
     // 429 是每分钟窗口，多 key 轮换下通常换个 key 就能过；退避别太久
@@ -426,6 +468,12 @@ async function viaWorkerGroq(texts){
   if (!d || !Array.isArray(d.zh) || d.zh.length !== texts.length) {
     groqDownUntil = Date.now() + 2 * 60 * 1000;
     throw new Error('gq align');
+  }
+  /* 部分命中时 Worker 会带 error 字段且槽位为空串，
+     这些槽位要留给 Google/MyMemory 兜底，不能当成成功 */
+  if (d.error && d.zh.every(x => !x)) {
+    groqDownUntil = Date.now() + 60 * 1000;
+    throw new Error('gq ' + d.error);
   }
   return d.zh;
 }
@@ -447,9 +495,9 @@ async function translateBatch(texts){
   if (!uniq.length) return {};
   const map = {};
 
-  /* 已是中文的直接跳过，不占额度 */
+  /* 已是中文的直接跳过，不占额度，也不写进 st.tr
+     （写进去会被 renderRepo/renderMention 标成「机器翻译」） */
   const todo = uniq.filter(needsTranslation);
-  for (const t of uniq) if (!needsTranslation(t)) map[t] = t;
   if (!todo.length) return map;
 
   for (const chunk of packBatches(todo, GROQ_CHAR_BUDGET)) {
@@ -458,12 +506,15 @@ async function translateBatch(texts){
       chunk.forEach((t, n) => { if (out[n] && out[n] !== t) map[t] = out[n]; });
       await new Promise(r => setTimeout(r, 300));
     } catch(e) {
-      // Groq 不可用：这批退到 Google / MyMemory
-      for (const t of chunk) {
+      /* Worker 不可用。此时只剩浏览器直连 Google / MyMemory，
+         但 Google 的 CORS 已经全封，MyMemory 配额极小——
+         逐条串行只会让界面卡几十秒，所以只试前 2 条探测通道，
+         失败就整体放弃这一轮，留到下一轮重试。 */
+      for (const t of chunk.slice(0, 2)) {
         const v = await translateOne(t);
         if (v && v !== t) map[t] = v;
       }
-      if (Date.now() < groqDownUntil) break;   // 已熔断，剩下的留到下一轮
+      if (Date.now() < groqDownUntil || Date.now() < googleDownUntil) break;
     }
   }
   return map;
@@ -509,8 +560,13 @@ function renderTopic(d){
       '</div></article>').join('');
   const tb = $('#topicBack');
   if (tb) tb.onclick = () => {
-    if (history.state && history.state.v) history.back();
-    else { st.topicSlug = null; refresh(false); }
+    /* 冷启动直达 #topic 时栈底就是这条记录，back 会直接退出应用 */
+    if (history.state && history.state.v && history.length > 1) history.back();
+    else {
+      try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+      st.topicSlug = null;
+      refresh(false);
+    }
   };
 }
 
@@ -637,6 +693,8 @@ function renderBoard(full){
       '<div id="loadmore" class="sentinel"></div>';
   }
   list.dataset.rendered = String(pages.length);
+  // 先清掉上一轮的按钮，否则追加渲染后它会卡在列表中间/底部不消失
+  list.querySelectorAll('.loadmore-btn').forEach(b => b.remove());
   if (st.needManual && st.hasMore) {
     const btn = document.createElement('button');
     btn.className = 'loadmore-btn';
@@ -667,9 +725,11 @@ async function loadMoreBoard(){
   if (!BOARD.has(st.tf) || st.q) return;
   st.loading = true;
   const pToken = st.pagingToken || 0;
-  // 冷门语言每期只有 1~2 条，一屏铺不满会导致连续触发几十次请求
-  st.autoLoads = (st.autoLoads || 0) + 1;
-  if (st.autoLoads > 3) {
+  /* 只在「连续多次加载都没铺满一屏」时才转手动按钮：
+     冷门语言每期 1~2 条，不设限会连发几十次请求。
+     判据是「本轮新增条数」，不是「累计加载次数」——
+     后者会让主榜单滚 3 页后永久失效。 */
+  if ((st.autoLoads || 0) >= 8) {
     st.needManual = true;
     st.loading = false;
     renderBoard(true);
@@ -685,6 +745,11 @@ async function loadMoreBoard(){
     if (pToken !== (st.pagingToken || 0) || !st.pages) { st.loading = false; return; }
     if (d.items && d.items.length) {
       st.pages.push({ period: d.period || next, items: d.items, prev: d.prev || {} });
+      /* 一页装满（≥20 条）说明是正常榜单，重置计数；
+         只累计「空拉」次数，这才是请求风暴的真实信号 */
+      st.autoLoads = d.items.length >= 20 ? 0 : (st.autoLoads || 0) + 1;
+    } else {
+      st.autoLoads = (st.autoLoads || 0) + 1;
     }
     st.periodsLeft = (st.periodsLeft || []).filter(x => x !== next);
     st.hasMore = st.periodsLeft.length > 0;
@@ -880,6 +945,26 @@ function loadTrCache(){
   st.tr = (c && typeof c === 'object') ? c : {};
 }
 
+/* 构建期生成的静态译表：全站几千条文本一次翻好，前端只查表。
+   这是主通道；本地缓存 st.tr 只是补最近新出现、表里还没有的文本。 */
+let trTableLoaded = false;
+async function loadTrTable(){
+  if (trTableLoaded) return;
+  trTableLoaded = true;
+  try {
+    const r = await fetchWithTimeout('tr.json', 20000);
+    if (!r.ok) throw new Error('tr ' + r.status);
+    const table = await r.json();
+    if (table && typeof table === 'object') {
+      st.tr = Object.assign(table, st.tr || {});   // 本地缓存优先（可能更新）
+      save(TR_KEY, st.tr);
+    }
+  } catch(e) {
+    /* 表拿不到就退回实时翻译，功能不中断 */
+    trTableLoaded = false;
+  }
+}
+
 /* 只翻首屏（前 12 条）：全量翻译长文本要等十几秒，滚动时再补 */
 /* 每次最多翻 24 条未译文本；翻完再续，直到本视图全部译完。
    这样第 13 条以后、无限滚动新加载的页都能覆盖到。 */
@@ -895,7 +980,9 @@ async function translateView(){
   try {
     do {
       trDirty = false;
-      for (let round = 0; round < 12; round++) {
+      /* 译表覆盖绝大多数文本，实时通道只补新出现的少数几条。
+         轮次从 12 降到 4，避免表外文本把界面卡住几十秒。 */
+      for (let round = 0; round < 4; round++) {
         const view = st.tf;
         const seen = st.tr || {};
         const pending = [...new Set(collectTexts().filter(t => t && !seen[t]))];
@@ -1071,32 +1158,56 @@ async function renderRepo(name){
 
   const tt = $('#trtoggle');
   if (tt) tt.onclick = async () => {
-    if (descZh) { descZh = ''; $('#ddesc').textContent = descEn; tt.textContent = '看中文'; }
-    else {
-      tt.textContent = '翻译中…';
-      const m = await translateBatch([descEn]);
-      descZh = m[descEn] || '';
-      st.tr = Object.assign(st.tr || {}, m);
-      $('#ddesc').textContent = descZh || descEn;
-      tt.textContent = descZh ? '看原文' : '翻译失败';
+    const note = () => document.querySelector('.tr-note span');
+    if (descZh) {
+      descZh = '';
+      $('#ddesc').textContent = descEn;
+      tt.textContent = '看中文';
+      if (note()) note().textContent = '原文';
+      return;
     }
+    /* 先查缓存：切回中文不该再发一次网络请求 */
+    const cached = (st.tr || {})[descEn];
+    if (cached && cached !== descEn) {
+      descZh = cached;
+      $('#ddesc').textContent = cached;
+      tt.textContent = '看原文';
+      if (note()) note().textContent = '机器翻译';
+      return;
+    }
+    tt.textContent = '翻译中…';
+    const m = await translateBatch([descEn]);
+    if (st.cur !== name) return;              // 用户已切到别的仓库
+    descZh = m[descEn] || '';
+    st.tr = Object.assign(st.tr || {}, m);
+    if (descZh) saveTrCache();
+    $('#ddesc').textContent = descZh || descEn;
+    tt.textContent = descZh ? '看原文' : '翻译失败';
+    if (note()) note().textContent = descZh ? '机器翻译' : '原文';
   };
 }
 
 /* ---------- 控件 ---------- */
+let langsToken = 0;
 async function loadLangs(){
+  const token = ++langsToken;
+  const prevLang = st.lang;
   try {
     const d = await api('api/langs', { tf: st.tf });
+    if (token !== langsToken) return;      // 期间又切了栏目，丢弃旧结果
     st.langs = d.langs || [];
     const sel = $('#lang');
     // 切期次后若当前语言在该期次没有数据，退回「全部语言」，否则 select 会显示空白
-    if (st.lang && !st.langs.some(l => l.name === st.lang)) st.lang = '';
+    let langReset = false;
+    if (st.lang && !st.langs.some(l => l.name === st.lang)) { st.lang = ''; langReset = true; }
     sel.innerHTML = '<option value="">全部语言</option>' +
       st.langs.map(l => '<option value="' + esc(l.name) + '">' + esc(l.name) +
         ' (' + l.count + ')</option>').join('');
     sel.value = st.lang || '';
+    /* 语言被自动回退后必须重拉列表，否则下拉框显示「全部语言」而列表还是空 */
+    if (langReset && st.lang !== prevLang) refresh(false);
   } catch(e) {
-    st.langs = null;
+    if (token === langsToken) st.langs = null;
   }
 }
 
@@ -1134,7 +1245,8 @@ function bindControls(){
   $('#tabs').onclick = ev => {
     if (pressed) { pressed = false; return; }   // 长按刚触发，别顺带切换
     const b = ev.target.closest('.tab'); if (!b) return;
-    if (b.dataset.tf === st.tf) return;         // 点当前标签不重复加载
+    /* 在主题二级列表里点「主题」应回到全部主题，不能当成「已在该栏目」拦掉 */
+    if (b.dataset.tf === st.tf && !(b.dataset.tf === 'topics' && st.topicSlug)) return;         // 点当前标签不重复加载
     st.tf = b.dataset.tf; st.period = null; st.q = ''; $('#q').value = ''; st.topicSlug = null;
     st.pendingState = null;
     // 切栏目等于回到列表根，清掉残留的 hash/state，否则后续返回会跳回旧视图
@@ -1167,7 +1279,14 @@ function bindControls(){
   $('#q').oninput = ev => {
     clearTimeout(timer);
     const v = ev.target.value.trim();
-    timer = setTimeout(() => { st.q = v.length >= 2 ? v : ''; resetPaging(); refresh(false); }, 320);
+    timer = setTimeout(() => {
+      const next = v.length >= 2 ? v : '';
+      /* 查询词没变就别重载：打一个字再删掉会白清屏重拉一次 */
+      if (next === st.q) return;
+      st.q = next;
+      resetPaging();
+      refresh(false);
+    }, 320);
   };
 }
 
@@ -1352,13 +1471,19 @@ function renderOrderPanel(){
       const tfChanged = st.tf !== prevTf;
       const orderChanged = st.order.join(',') !== prevOrder;
 
-      // 退出面板：用 back 保持栈平衡，但先把上一条记录的视图改写成当前真实视图，
-      // 否则 popstate 会带着旧的 {v:'topic'} 回来把栏目强行切回去
-      if (history.state && history.state.v === 'order') {
-        try {
-          history.replaceState({ v: tfChanged ? null : undefined }, '', location.pathname);
-        } catch(e) {}
+      /* 退出面板。三种情况要分开处理：
+         ① 栈里还有上一条记录 → 先把当前这条改写成「无状态」，再 back，
+            否则 popstate 会带着旧的 {v:'topic'} 把刚隐藏的栏目切回来
+         ② 冷启动直达 #order（栈底就是它）→ back 会直接退出应用，改用 replaceState
+         ③ 不在 order 视图里 → 直接关面板 */
+      const isOrderState = history.state && history.state.v === 'order';
+      if (isOrderState && history.length > 1) {
+        try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
         history.back();
+      } else if (isOrderState) {
+        // 栈底：不能 back，原地换成列表视图
+        try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+        closeDetail();
       } else {
         closeDetail();
       }
@@ -1417,11 +1542,15 @@ function renderState(state){
     return;
   }
   if (state.v === 'topic') {
+    const already = st.tf === 'topics' && st.topicSlug === state.slug &&
+      st.data && st.data.topic && st.data.topic.slug === state.slug;
     closeDetail();
     st.topicSlug = state.slug;
     st.tf = 'topics';
     buildControls();
-    refresh(false);
+    /* 数据已经是这个主题了就别清空重拉：清空会让页面高度塌缩，
+       浏览器把刚恢复的滚动位置强制归零 */
+    if (!already) refresh(false);
     return;
   }
   closeDetail();
@@ -1494,9 +1623,12 @@ loadTrCache();
 buildControls();
 bindControls();
 initStatsControls();
-loadLangs();
-refresh(false);
-openFromHash();
+/* 译表先就位再拉列表：这样首屏渲染出来就是中文，不会先闪英文再跳 */
+loadTrTable().finally(() => {
+  loadLangs();
+  refresh(false);
+  openFromHash();
+});
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
