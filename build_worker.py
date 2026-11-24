@@ -7,7 +7,7 @@ import base64
 import json
 import pathlib
 
-SRC = pathlib.Path('/var/minis/workspace/trendshift-app')
+SRC = pathlib.Path(__file__).resolve().parent
 OUT = pathlib.Path('/tmp/ts_worker.js')
 
 html = (SRC / 'index.html').read_text(encoding='utf-8')

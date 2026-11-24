@@ -83,6 +83,9 @@ footer a{color:var(--acc)}
 .bar-v{width:62px;flex:0 0 62px;text-align:right;color:var(--dim);
   font-variant-numeric:tabular-nums;font-size:12px}
 
+/* 无限滚动：哨兵不可见，只用于触发加载 */
+.sentinel{height:1px}
+
 /* 二级列表返回 */
 .backlink{color:var(--acc);font-weight:600;font-size:12px;margin-right:8px;
   text-transform:none;letter-spacing:0}
@@ -209,6 +212,7 @@ const st = {
   data:null, err:null, langs:null, zh:true, cur:null,
   metric:'stars', statYear:null, statMonth:null,
   order: null, hidden: null, mcache: null,
+  pages: null, periodsLeft: null, hasMore: false, loading: false,
 };
 /* 标签顺序与隐藏项（本地持久化） */
 function loadTabPrefs(){
@@ -460,8 +464,86 @@ function render(){
 
   buildPeriods(d.periods, d.period);
   if (!d.items.length) { $('#list').innerHTML = '<div class="empty">该筛选下暂无数据</div>'; return; }
-  $('#list').innerHTML = d.items.map(e => card(e, d.prev)).join('');
+  renderBoard();
 }
+
+/* 榜单累积渲染：st.pages 里每页是一期的 {period, items, prev} */
+function renderBoard(){
+  const pages = st.pages || [];
+  if (!pages.length) return;
+  const html = pages.map(pg => pg.items.map(e => card(e, pg.prev)).join('')).join('');
+  // 底部只留一个不可见的哨兵，供 IntersectionObserver 监听，不显示任何文字
+  const tail = '<div id="loadmore" class="sentinel"></div>';
+  $('#list').innerHTML = html + tail;
+  armSentinel();
+}
+
+/* 用 IntersectionObserver 监听底部哨兵——比 scroll 事件可靠（WebView 里 scroll 可能不派发） */
+let io = null;
+function armSentinel(){
+  const el = $('#loadmore');
+  if (!el) return;
+  if (io) io.disconnect();
+  if (!st.hasMore || !st.pages) return;
+  io = new IntersectionObserver(entries => {
+    if (entries.some(e => e.isIntersecting)) loadMoreBoard();
+  }, { rootMargin: '600px 0px' });
+  io.observe(el);
+}
+
+/* 加载下一页：取剩余期次里的第一个，追加到列表末尾 */
+async function loadMoreBoard(){
+  if (st.loading || !st.hasMore) return;
+  if (!BOARD.has(st.tf) || st.q) return;
+  st.loading = true;
+  const next = (st.periodsLeft || [])[0];
+  if (!next) { st.hasMore = false; st.loading = false; renderBoard(); return; }
+  try {
+    const d = await api('api/list', {
+      tf: st.tf, lang: st.lang, period: next, sort: st.sort, limit: 100,
+    });
+    if (d.items && d.items.length) {
+      st.pages.push({ period: d.period || next, items: d.items, prev: d.prev || {} });
+    }
+    st.periodsLeft = (st.periodsLeft || []).filter(x => x !== next);
+    st.hasMore = st.periodsLeft.length > 0;
+    renderBoard();
+  } catch(e) {
+    // 静默失败：保持哨兵在视口外，用户继续下滑会再次触发
+    st.loading = false;
+    setTimeout(armSentinel, 1500);
+    return;
+  }
+  st.loading = false;
+  translateView();
+}
+
+/* 内容不足一屏时补一页（否则用户没有可滚动空间去触发哨兵） */
+function maybeLoadMore(){
+  if (!st.hasMore || st.loading) return;
+  const doc = document.documentElement;
+  const remain = doc.scrollHeight - window.scrollY - window.innerHeight;
+  if (remain < 600) loadMoreBoard();
+}
+
+/* 三重触发，任一可用即可（不同 WebView 支持度不一）：
+   ① IntersectionObserver ② scroll 事件 ③ 轻量轮询兜底 */
+let lastCheck = 0;
+window.addEventListener('scroll', () => {
+  const now = Date.now();
+  if (now - lastCheck < 300) return;
+  lastCheck = now;
+  checkNearBottom();
+}, { passive: true });
+
+function checkNearBottom(){
+  if (!st.hasMore || st.loading || !BOARD.has(st.tf) || st.q) return;
+  const remain = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+  if (remain < 700) loadMoreBoard();
+}
+
+/* 轮询兜底：只在有更多内容时运行，页面隐藏时自动跳过，开销可忽略 */
+setInterval(checkNearBottom, 1200);
 
 /* 统一取译：有译文用译文，否则原文 */
 function T(text){
@@ -524,6 +606,11 @@ async function refresh(force){
       const d = await api('api/list', { tf: st.tf, lang: st.lang, period: st.period, sort: st.sort });
       st.period = d.period;
       st.data = d;
+      // 无限滚动状态：已加载页 + 剩余期次
+      st.pages = [{ period: d.period, items: d.items, prev: d.prev }];
+      st.periodsLeft = (d.periods || []).filter(x => x !== d.period);
+      st.hasMore = st.periodsLeft.length > 0;
+      st.loading = false;
     }
     save('ts:last:' + st.tf + ':' + st.lang, st.data);
   } catch (e) {
@@ -541,6 +628,7 @@ function collectTexts(){
   const out = [];
   const push = v => { if (v && typeof v === 'string') out.push(v); };
   if (d.items) d.items.forEach(e => push(e.d));
+  if (st.pages) st.pages.forEach(pg => pg.items.forEach(e => push(e.d)));
   if (d.search) d.search.items.forEach(e => push(e.d));
   if (d.topics) d.topics.forEach(t => push(t.n));
   if (d.topic) d.topic.items.forEach(e => push(e.d));
@@ -572,7 +660,9 @@ async function translateView(){
   if (!Object.keys(map).length) return;
   st.tr = Object.assign(st.tr || {}, map);
   saveTrCache();
-  if (st.tf === view) render();          // 用户已切走就别覆盖当前页
+  if (st.tf !== view) return;            // 用户已切走就别覆盖当前页
+  if (BOARD.has(st.tf) && !st.q && st.pages) renderBoard();
+  else render();
 }
 
 /* ---------- 详情页 ---------- */
@@ -756,6 +846,7 @@ function buildControls(){
     if (pressed) { pressed = false; return; }   // 长按刚触发，别顺带切换
     const b = ev.target.closest('.tab'); if (!b) return;
     st.tf = b.dataset.tf; st.period = null; st.q = ''; $('#q').value = ''; st.topicSlug = null;
+    st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
     buildControls();
     if (BOARD.has(st.tf)) loadLangs();
     refresh(false);
