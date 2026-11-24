@@ -1675,10 +1675,11 @@ function go(state){
   /* _d = 本应用实际压过的历史深度。不能用 history.length 判断「有没有上一页」：
      它把进站前的页面（Telegram / Google）也计入，从外链冷启动时 length ≥ 2，
      返回键会直接离开应用而不是回到列表。 */
-  const depth = ((history.state && history.state._d) || 0) + 1;
+  const depth = ((history.state && history.state._d) || 1) + 1;
   const next = Object.assign({}, state, { _d: depth });
   try { history.pushState(next, '', hashOf(next)); } catch(e) {}
   curView = true; onGuard = false;
+  hideExitHint();
   renderState(next);
 }
 
@@ -1702,40 +1703,45 @@ $('#list').addEventListener('click', ev => {
 $('#back').onclick = () => {
   const s = history.state || {};
   if (s.v && ((s._d) || 0) > 1) history.back();
-  else { renderState(null); showExitHint(); }   // 已在根：只提示，不退出
+  else { renderState(null); showExitHint(); }
 };
 
 /* ---------- 「再按一次返回退出」 ----------
-   Android 手势返回在列表根按下时，WebView 直接 goBack()/finish()，页面没有机会拦截。
-   做法：在列表根上垫一条同 URL 的「守卫」记录（state.guard = 1），让栈里始终多一层：
+   WebView 里的手势返回等价于 canGoBack() ? goBack() : finish()。
+   页面拦不住 finish()，唯一能控制的是「栈里还有没有上一层」：
 
-     [根 A] [守卫 G] ← 空闲状态
-     第一次返回 → 落到 A：弹提示，**不再补守卫**（栈里已无更早记录）
-     第二次返回 → 宿主发现 canGoBack() === false，直接结束页面 = 退出
+     空闲： [根 A] [守卫 G] ← 当前
+     第 1 次返回 → 落到 A（页面还在），弹「再按一次返回退出」
+     第 2 次返回 → 栈里已无更早记录，宿主直接结束页面 = 退出
 
-   关键点：
-   · 绝不在「已落到 A」时再 pushGuard —— 那会让用户按三次才退得出去；
-   · 从详情/主题返回到守卫上是静默的（不弹提示）；
-   · 若从视图直接落回 A（守卫被裁掉），静默补一条守卫，保证下次仍是两步。
+   ★ 落到 A 之后绝不再补守卫：补了就永远退不出去（按几次都只看到提示）。
+   ★ 也不在滚动/点按时补，否则「按一次 → 滚一下 → 再按」会无限循环。
+     只有重新进入某个视图（详情/主题/热议/排序）时，返回落回 A 才补一条。
    ★ 不能只靠 beforeunload：WebView 的手势返回不保证触发它。 */
-let onGuard = false;     // 当前站在守卫记录上
+let onGuard = false;     // 栈顶是本应用垫的守卫记录
 let curView = false;     // 当前渲染的是某个视图（详情/主题/热议/排序）
 const EXIT_WINDOW = 2000;
+
+function hideExitHint(){
+  clearTimeout(hideExitHint._t);
+  const el = $('#exitHint');
+  if (el) el.classList.remove('on');
+}
 
 function showExitHint(){
   const el = $('#exitHint');
   if (!el) return;
   el.classList.add('on');
-  clearTimeout(showExitHint._t);
-  showExitHint._t = setTimeout(() => el.classList.remove('on'), EXIT_WINDOW);
+  clearTimeout(hideExitHint._t);
+  hideExitHint._t = setTimeout(() => el.classList.remove('on'), EXIT_WINDOW);
 }
 
-function hideExitHint(){
-  const el = $('#exitHint');
-  if (el) el.classList.remove('on');
-}
-
-/* 垫一条守卫记录（已经站在守卫上就不重复压） */
+/* 垫一条守卫记录，让列表根上方永远多一层：
+     [根 A] [守卫 G] ← 当前
+   Android 手势返回在 WebView 里等价于 canGoBack() ? goBack() : finish()，
+   页面自己拦不住 finish()，只能靠「栈里有没有上一层」来控制。
+   所以：G 在 → 第一次手势落到 A（页面还在）；A 上不再垫 → 第二次手势宿主直接结束页面。
+   ★ 落到 A 之后绝对不能再 pushGuard，否则永远退不出去。 */
 function pushGuard(){
   if (onGuard) return;
   const depth = (history.state && history.state._d) || 1;
@@ -1750,13 +1756,14 @@ window.addEventListener('popstate', () => {
   const s = history.state || {};
   const wasView = curView;
   curView = !!s.v;
-  if (s.v) { onGuard = false; hideExitHint(); renderState(s); return; }
-  /* 落到列表根 */
+  if (s.v) { onGuard = false; hideExitHint(); renderState(s); return; }   // 进入某个视图
   renderState(null);
-  if (s.guard) { onGuard = true; hideExitHint(); return; }   // 从视图返回，静默
+  if (s.guard) { onGuard = true; hideExitHint(); return; }                 // 从视图返回，静默
+  /* 落到根 A：守卫刚被吃掉，这一次只提示。
+     再按一次时 canGoBack() 已是 false，WebView 会结束页面 = 退出。 */
   onGuard = false;
-  if (wasView) { pushGuard(); return; }                      // 视图直接落回根：补守卫
-  showExitHint();                                            // 在根上按了返回：只提示
+  if (wasView) { pushGuard(); return; }                                    // 视图直接落回根：补守卫
+  showExitHint();
 });
 
 /* 冷启动带 hash 直达；replaceState 让返回键直接退出而不是回到同一视图。
