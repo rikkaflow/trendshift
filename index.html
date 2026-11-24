@@ -1714,9 +1714,11 @@ $('#back').onclick = () => {
      第 1 次返回 → 落到 A（页面还在），弹「再按一次返回退出」
      第 2 次返回 → 栈里已无更早记录，宿主直接结束页面 = 退出
 
-   ★ 落到 A 之后绝不再补守卫：补了就永远退不出去（按几次都只看到提示）。
-   ★ 也不在滚动/点按时补，否则「按一次 → 滚一下 → 再按」会无限循环。
-     只有重新进入某个视图（详情/主题/热议/排序）时，返回落回 A 才补一条。
+   ★ 补守卫只能由「提示显示满 2 秒」这一个计时器触发：
+     · 2 秒内连按两下 → 栈里已无更早记录，宿主结束页面 = 退出（这就是要的效果）
+     · 隔久了再按 → 守卫已被计时器垫回，只弹提示，不会一按即退
+   ★ 绝不在 popstate 里同步补、也不在滚动/点按时补：
+     那样用户按几次都只看到提示，永远退不出去（已实测踩过）。
    ★ 不能只靠 beforeunload：WebView 的手势返回不保证触发它。 */
 let onGuard = false;     // 栈顶是本应用垫的守卫记录
 let curView = false;     // 当前渲染的是某个视图（详情/主题/热议/排序）
@@ -1733,7 +1735,13 @@ function showExitHint(){
   if (!el) return;
   el.classList.add('on');
   clearTimeout(hideExitHint._t);
-  hideExitHint._t = setTimeout(() => el.classList.remove('on'), EXIT_WINDOW);
+  hideExitHint._t = setTimeout(() => {
+    if (el) el.classList.remove('on');
+    /* 提示过期后把守卫垫回去：否则隔几秒再按一次就「一按即退」，
+       「两次返回」只在 2 秒窗口内成立，等于没做。
+       垫回去之后每次返回都先落到根 A、只弹提示，真要退出必须连按两下。 */
+    if (!onGuard && !curView) pushGuard();
+  }, EXIT_WINDOW);
 }
 
 /* 垫一条守卫记录，让列表根上方永远多一层：
