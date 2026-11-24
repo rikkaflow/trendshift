@@ -64,6 +64,7 @@ upload_worker.py        上传（multipart，携带 TR_KV 绑定）
 deploy.sh               打包 + 上传 + 验证一条龙
 cloud_sync.py           云端增量翻译（跑在 GitHub Actions，本地不用管）
 translations.json       译表兜底快照（KV 不可用时由 Worker 内联返回）
+tests/                  回归测试（5 套，全部不联网）
 .github/workflows/daily-translate.yml   每日定时任务
 make_icons.py           生成 PNG 图标（Pillow）
 manifest.webmanifest    PWA 清单
@@ -178,3 +179,4 @@ GitHub Actions 需要同名 secrets：`CF_ACCOUNT_ID` / `CF_API_TOKEN` / `TR_KV_
 | v6 | 榜单无限滚动（滚到底加载更早期次）；一键部署/恢复脚本；备份体系 |
 | v6.1 | 顶栏期次选择器跟随滚动自动切换 |
 | v6.5 | **预翻译表 + 云端增量**：全站简介离线翻好存 KV，前端直接查表；GitHub Actions 每天自动抓增量、翻译、写 KV，本地无需参与 |
+| v6.7 | **审计核实修复**：KV 读失败不再清空译表（`http()` 曾把 curl returncode 当 HTTP 状态码）；`/api/tr` 返回长度与请求对齐；译表竞态（首屏不再白翻已有条目）；历史栈返回次数；`sw.js` 不再 4 秒掐断 tr.json；快照键区分搜索/主题/统计；5 套回归测试 |
