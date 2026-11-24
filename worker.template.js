@@ -11,7 +11,8 @@ const UA = 'Mozilla/5.0 (compatible; TrendshiftApp/3.0)';
 
 const SHELL = __ASSETS__;
 
-const json = (obj, maxAge = 300) => new Response(JSON.stringify(obj), {
+const json = (obj, maxAge = 300, status = 200) => new Response(JSON.stringify(obj), {
+  status,
   headers: {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'public, max-age=' + maxAge,
@@ -155,39 +156,6 @@ async function tsJson(path, ctx, ttl = 3600) {
   }, ctx);
 }
 
-/* 单条翻译，结果按原文缓存 30 天。Google 免费端点偶发限流，退 MyMemory。 */
-async function translateOne(text, ctx) {
-  const t = String(text).slice(0, 480);
-  if (!t.trim()) return '';
-  if (/^[\s\S]*[\u4e00-\u9fa5][\s\S]*$/.test(t)) return t;   // 已是中文
-  const res = await cached('https://ts.internal/tr/' + encodeURIComponent(t), 30 * 86400, async () => {
-    let out = '';
-    try {
-      const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=' +
-        encodeURIComponent(t);
-      const r = await fetch(u, { headers: { 'user-agent': UA } });
-      if (r.ok) {
-        const d = await r.json();
-        out = (d[0] || []).map(x => x[0] || '').join('').trim();
-      }
-    } catch (e) {}
-    if (!out) {
-      try {
-        const u = 'https://api.mymemory.translated.net/get?langpair=en|zh-CN&q=' + encodeURIComponent(t);
-        const r = await fetch(u, { headers: { 'user-agent': UA } });
-        if (r.ok) {
-          const d = await r.json();
-          const v = d && d.responseData && d.responseData.translatedText;
-          if (v && !/^[A-Za-z\s,.'"!?-]+$/.test(v)) out = v;
-        }
-      } catch (e) {}
-    }
-    return { zh: out };
-  }, ctx);
-  const j = await res.json();
-  return j.zh || '';
-}
-
 /* 热议：原站公开接口无 CORS，靠 Worker 代理 */
 async function mentions(ctx) {
   return await cached('https://ts.internal/mentions', 300, async () => {
@@ -211,14 +179,6 @@ async function api(url, ctx) {
   const path = url.pathname;
 
   if (path === '/api/mentions') return json(await (await mentions(ctx)).json(), 300);
-
-  /* --- 翻译：Google 优先，MyMemory 兜底，单条缓存 30 天 --- */
-  if (path === '/api/tr') {
-    const raw = (p.get('t') || '').split('\u0001').filter(Boolean).slice(0, 12);
-    if (!raw.length) return json({ zh: [] }, 60);
-    const zh = await Promise.all(raw.map(t => translateOne(t, ctx)));
-    return json({ zh }, 86400);
-  }
 
   /* --- 主题列表 --- */
   if (path === '/api/topics') {
@@ -382,47 +342,19 @@ async function handle(request, event) {
       },
     });
   }
-  if (url.pathname === '/debug/rsc') {
-    const path = url.searchParams.get('p') || 'topics';
-    const r = await fetch(TS + '/' + path + '?_rsc', {
-      headers: { 'user-agent': UA, RSC: '1', accept: 'text/x-component' },
-      redirect: 'manual',
-    });
-    const txt = await r.text();
-    const objs = rscObjects(txt);
-    const sample = objs.slice(0, 3).map(o => o && typeof o === 'object' ? Object.keys(o).slice(0, 6) : typeof o);
-    const hit = findOne(objs, o => Array.isArray(o.tags) && o.tags.length > 3);
-    return json({ status: r.status, ct: r.headers.get('content-type'),
-      loc: r.headers.get('location'), len: txt.length, objCount: objs.length,
-      sample, tagsHit: !!hit, tagsLen: hit ? hit.tags.length : 0,
-      lines: txt.split('\n').length,
-      hasTags: txt.includes('"tags"'), hasInit: txt.includes('initialRepositories'),
-      hasFull: txt.includes('full_name'), hasDevs: txt.includes('developers'),
-      tail: (() => {
-        const lines = txt.split('\n');
-        let matched = 0, ok = 0, bad = 0, longest = 0, badSample = '';
-        for (const l of lines) {
-          const m = /^[0-9a-f]+:(.*)$/.exec(l.trim());
-          if (!m) continue;
-          matched++;
-          longest = Math.max(longest, m[1].length);
-          try { JSON.parse(m[1]); ok++; } catch(e) { bad++; if (!badSample) badSample = l.slice(0,120); }
-        }
-        return { matched, ok, bad, longest, badSample };
-      })() });
-  }
   if (url.pathname === '/health') {
     return json({
       ok: true, v: 3, paths: Object.keys(SHELL),
       api: ['/api/list', '/api/langs', '/api/periods', '/api/search', '/api/repo',
-        '/api/topics', '/api/topic', '/api/ghtrending', '/api/devs', '/api/stats', '/api/mentions', '/api/tr'],
+        '/api/topics', '/api/topic', '/api/ghtrending', '/api/devs', '/api/stats', '/api/mentions'],
     });
   }
   if (url.pathname.startsWith('/api/')) {
     try {
       return await api(url, event);
     } catch (e) {
-      return json({ error: String((e && e.message) || e) }, 30);
+      // 必须用非 2xx：否则前端 api() 放行、sw 缓存错误对象、渲染时 undefined 崩溃
+      return json({ error: String((e && e.message) || e) }, 0, 502);
     }
   }
   const hit = SHELL[url.pathname] || (url.pathname.endsWith('/') ? SHELL['/'] : null);
