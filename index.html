@@ -87,6 +87,11 @@ footer a{color:var(--acc)}
 /* 统计栏 3 个下拉框均分宽度，避免被全局 max-width:48% 挤在一起 */
 #rowStats select{flex:1;max-width:none;min-width:0}
 
+/* 冷门语言手动加载按钮 */
+.loadmore-btn{display:block;width:100%;margin:14px 0 6px;padding:12px;
+  border-radius:11px;border:1px solid var(--line);background:var(--card);
+  color:var(--dim);font-size:13px}
+
 /* 无限滚动：哨兵不可见，只用于触发加载 */
 .sentinel{height:1px}
 .pgroup{display:block}
@@ -218,7 +223,7 @@ const st = {
   metric:'stars', statYear:null, statMonth:null,
   order: null, hidden: null, mcache: null,
   pages: null, periodsLeft: null, hasMore: false, loading: false,
-  repoToken: 0, pendingState: null,
+  repoToken: 0, refreshToken: 0, pendingState: null,
 };
 /* 标签顺序与隐藏项（本地持久化） */
 function loadTabPrefs(){
@@ -382,42 +387,85 @@ async function viaMyMemory(text){
 async function translateOne(text){
   const t = String(text).slice(0, 600);
   if (!t.trim()) return '';
-  if (/[\u4e00-\u9fa5]/.test(t)) return t;        // 已是中文
+  if (/[\u4e00-\u9fa5]/.test(t)) return t;        // 已含中文，原样返回（上层会标记）
   try { const v = await googleOne(t); if (v) return v; } catch(e) {}
   try { return await viaMyMemory(t); } catch(e) { return ''; }
+}
+
+/* 翻译通道优先级：
+   ① Worker /api/tr（Groq，key 在服务端，一次请求翻一整批，含换行长文本）
+   ② 浏览器直连 Google（免费，但会限流）
+   ③ MyMemory（配额极小，最后兜底）
+
+   Groq 免费额度：1000 请求/日、8000 token/分钟。按「字符数」打包而不是固定条数，
+   否则 10 条长简介就超限；已含中文的文本直接跳过，不浪费 token。 */
+let groqDownUntil = 0;
+/* Gemini lite：250K 上下文、单 key 10 RPM，但请求数才是稀缺资源（500 次/天）。
+   把每批做大 → 请求数变少。3000 字符约 900 token，远低于上下文上限。 */
+const GROQ_CHAR_BUDGET = 3000;
+const CJK = /[\u4e00-\u9fa5]/;
+
+function needsTranslation(t){ return t && !CJK.test(t); }
+
+async function viaWorkerGroq(texts){
+  if (Date.now() < groqDownUntil) throw new Error('gq skip');
+  const u = new URL('api/tr', location.href);
+  u.searchParams.set('t', texts.join('\u0001'));
+  let r = await fetchWithTimeout(u, 30000);
+  if (r.status === 429) {
+    // 每分钟 token 限额：等 25 秒重试一次，比整轮降级划算
+    await new Promise(x => setTimeout(x, 8000));
+    r = await fetchWithTimeout(u, 30000);
+  }
+  if (!r.ok) {
+    // 429 是每分钟窗口，多 key 轮换下通常换个 key 就能过；退避别太久
+    groqDownUntil = Date.now() + (r.status === 429 ? 15 : 60) * 1000;
+    throw new Error('gq ' + r.status);
+  }
+  const d = await r.json();
+  if (!d || !Array.isArray(d.zh) || d.zh.length !== texts.length) {
+    groqDownUntil = Date.now() + 2 * 60 * 1000;
+    throw new Error('gq align');
+  }
+  return d.zh;
+}
+
+/* 按字符预算打包，避免长文本一批就爆 token */
+function packBatches(texts, budget){
+  const out = [];
+  let cur = [], size = 0;
+  for (const t of texts) {
+    if (cur.length && size + t.length > budget) { out.push(cur); cur = []; size = 0; }
+    cur.push(t); size += t.length;
+  }
+  if (cur.length) out.push(cur);
+  return out;
 }
 
 async function translateBatch(texts){
   const uniq = [...new Set(texts.filter(Boolean))];
   if (!uniq.length) return {};
   const map = {};
-  const put = (src, zh) => { if (zh && zh !== src) map[src] = zh; };
 
-  const batchable = uniq.filter(isBatchable);
-  const single = uniq.filter(t => !isBatchable(t));
+  /* 已是中文的直接跳过，不占额度 */
+  const todo = uniq.filter(needsTranslation);
+  for (const t of uniq) if (!needsTranslation(t)) map[t] = t;
+  if (!todo.length) return map;
 
-  /* 单行短文本：12 条一批 */
-  for (let i = 0; i < batchable.length; i += 12) {
-    const chunk = batchable.slice(i, i + 12);
+  for (const chunk of packBatches(todo, GROQ_CHAR_BUDGET)) {
     try {
-      const out = await googleBatch(chunk);
-      chunk.forEach((t, n) => put(t, out[n]));
+      const out = await viaWorkerGroq(chunk);
+      chunk.forEach((t, n) => { if (out[n] && out[n] !== t) map[t] = out[n]; });
+      await new Promise(r => setTimeout(r, 300));
     } catch(e) {
-      // 批量失败（对不齐/超长/限流）→ 这批退单条
-      for (const t of chunk) put(t, await translateOne(t));
+      // Groq 不可用：这批退到 Google / MyMemory
+      for (const t of chunk) {
+        const v = await translateOne(t);
+        if (v && v !== t) map[t] = v;
+      }
+      if (Date.now() < groqDownUntil) break;   // 已熔断，剩下的留到下一轮
     }
-    if (i + 12 < batchable.length) await new Promise(r => setTimeout(r, 200));
   }
-
-  /* 含换行的长文本：必须逐条，6 条并发 */
-  const CONCURRENCY = 6;
-  for (let i = 0; i < single.length; i += CONCURRENCY) {
-    const chunk = single.slice(i, i + CONCURRENCY);
-    const got = await Promise.all(chunk.map(async src => [src, await translateOne(src)]));
-    for (const [src, zh] of got) put(src, zh);
-    if (i + CONCURRENCY < single.length) await new Promise(r => setTimeout(r, 250));
-  }
-
   return map;
 }
 
@@ -437,7 +485,8 @@ function renderTopics(topics){
   $('#list').innerHTML = keys.map(ch =>
     '<div class="grp"><div class="grp-h">' + esc(ch) + '</div>' +
       groups.get(ch).map(t =>
-        '<button class="tag" data-slug="' + esc(t.s) + '">' + esc(T(t.n)) + '</button>'
+        '<button class="tag" data-slug="' + esc(t.s) + '" data-i18n="' + esc(t.n) + '">' +
+          esc(T(t.n)) + '</button>'
       ).join('') +
     '</div>').join('');
 }
@@ -455,7 +504,7 @@ function renderTopic(d){
           '<span class="gain">' + k(e.s) + '★</span></div>' +
         '<div class="meta">' + k(e.s) + '★ · ' + k(e.f) + ' fork' +
           (e.c ? ' · 建于 ' + esc(String(e.c).slice(0, 10)) : '') + '</div>' +
-        (e.d ? '<div class="desc">' + esc(T(e.d)) + '</div>' : '') +
+        (e.d ? '<div class="desc" data-i18n="' + esc(e.d) + '">' + esc(T(e.d)) + '</div>' : '') +
         (e.l ? '<div class="chips"><span class="chip lang">' + esc(e.l) + '</span></div>' : '') +
       '</div></article>').join('');
   const tb = $('#topicBack');
@@ -475,7 +524,7 @@ function renderGh(items){
         '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
           '<span class="gain">上榜 ' + e.cnt + ' 次</span></div>' +
         '<div class="meta">历史最好第 ' + e.best + ' 名</div>' +
-        (e.d ? '<div class="desc">' + esc(T(e.d)) + '</div>' : '') +
+        (e.d ? '<div class="desc" data-i18n="' + esc(e.d) + '">' + esc(T(e.d)) + '</div>' : '') +
       '</div></article>').join('');
 }
 
@@ -493,7 +542,7 @@ function renderDevs(items){
         '</div>' +
         '<div class="meta">' + k(d.followers) + ' 关注者 · ' + k(d.repos) + ' 仓库' +
           ' · 上榜 ' + d.cnt + ' 次</div>' +
-        (d.bio ? '<div class="desc">' + esc(T(d.bio)) + '</div>' : '') +
+        (d.bio ? '<div class="desc" data-i18n="' + esc(d.bio) + '">' + esc(T(d.bio)) + '</div>' : '') +
         ((d.company || d.location) ? '<div class="chips">' +
           (d.company ? '<span class="chip">' + esc(d.company) + '</span>' : '') +
           (d.location ? '<span class="chip">' + esc(d.location) + '</span>' : '') +
@@ -544,7 +593,7 @@ function render(){
           '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
             '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
           '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
-          (m.text ? '<div class="desc">' + esc(T(m.text)) + '</div>' : '') +
+          (m.text ? '<div class="desc" data-i18n="' + esc(m.text) + '">' + esc(T(m.text)) + '</div>' : '') +
           (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
         '</div></article>';
     }).join('');
@@ -588,6 +637,13 @@ function renderBoard(full){
       '<div id="loadmore" class="sentinel"></div>';
   }
   list.dataset.rendered = String(pages.length);
+  if (st.needManual && st.hasMore) {
+    const btn = document.createElement('button');
+    btn.className = 'loadmore-btn';
+    btn.textContent = '加载更早期次';
+    btn.onclick = () => { st.needManual = false; st.autoLoads = 0; loadMoreBoard(); };
+    list.appendChild(btn);
+  }
   armSentinel();
   syncPeriodSelect();
 }
@@ -610,12 +666,23 @@ async function loadMoreBoard(){
   if (st.loading || !st.hasMore) return;
   if (!BOARD.has(st.tf) || st.q) return;
   st.loading = true;
+  const pToken = st.pagingToken || 0;
+  // 冷门语言每期只有 1~2 条，一屏铺不满会导致连续触发几十次请求
+  st.autoLoads = (st.autoLoads || 0) + 1;
+  if (st.autoLoads > 3) {
+    st.needManual = true;
+    st.loading = false;
+    renderBoard(true);
+    return;
+  }
   const next = (st.periodsLeft || [])[0];
   if (!next) { st.hasMore = false; st.loading = false; renderBoard(true); return; }
   try {
     const d = await api('api/list', {
       tf: st.tf, lang: st.lang, period: next, sort: st.sort, limit: 100,
     });
+    // 翻页期间用户可能切了栏目/语言
+    if (pToken !== (st.pagingToken || 0) || !st.pages) { st.loading = false; return; }
     if (d.items && d.items.length) {
       st.pages.push({ period: d.period || next, items: d.items, prev: d.prev || {} });
     }
@@ -646,7 +713,7 @@ function checkNearBottom(){
   // 定时器会误判「到底了」而疯狂加载旧期次，必须挡掉
   if (document.body.classList.contains('detail')) return;
   syncPeriodSelect();
-  if (!st.hasMore || st.loading || !BOARD.has(st.tf) || st.q) return;
+  if (!st.hasMore || st.loading || st.needManual || !BOARD.has(st.tf) || st.q) return;
   const remain = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
   if (remain < 700) loadMoreBoard();
 }
@@ -672,6 +739,7 @@ function syncPeriodSelect(){
 
 /* 轮询兜底：只在有更多内容时运行，页面隐藏时自动跳过，开销可忽略 */
 setInterval(() => {
+  if (document.hidden) return;                 // 后台标签页不跑
   if (!BOARD.has(st.tf) || !st.hasMore || st.loading) return;
   checkNearBottom();
 }, 1200);
@@ -707,13 +775,15 @@ function card(e, prev){
         '<span class="gain">+' + k(e.g) + '</span></div>' +
       '<div class="meta">' + k(e.s) + '★ · ' + k(e.f) + ' fork' +
         (e.c ? ' · 建于 ' + esc(e.c.slice(0, 10)) : '') + '</div>' +
-      (desc ? '<div class="desc">' + esc(desc) + '</div>' : '') +
+      (desc ? '<div class="desc" data-i18n="' + esc(e.d || '') + '">' + esc(desc) + '</div>' : '') +
       (chips.length ? '<div class="chips">' + chips.join('') + '</div>' : '') +
     '</div></article>';
 }
 
 async function refresh(force){
-  if (force) { cache.clear(); if (window.caches) caches.keys().then(ks => ks.forEach(x => caches.delete(x))); }
+  const token = ++st.refreshToken;
+  const snap = { tf: st.tf, lang: st.lang, q: st.q, topicSlug: st.topicSlug };
+  if (force) { cache.clear(); }
   st.data = null; st.err = null;
   skeleton(5);
   try {
@@ -748,9 +818,12 @@ async function refresh(force){
       st.loading = false;
       const ll = $('#list'); if (ll) ll.dataset.rendered = '0';
     }
-    save('ts:last:' + st.tf + ':' + st.lang, st.data);
+    // 慢请求返回时用户可能已切栏目：丢弃，且不能写进别的栏目的缓存
+    if (token !== st.refreshToken) return;
+    save('ts:last:' + snap.tf + ':' + snap.lang, st.data);
   } catch (e) {
-    const cached = read('ts:last:' + st.tf + ':' + st.lang);
+    if (token !== st.refreshToken) return;
+    const cached = read('ts:last:' + snap.tf + ':' + snap.lang);
     if (cached && !cached.error) {
       st.data = cached;
       // 离线恢复必须同步重建分页，否则 renderBoard 只看到空 pages 就停在骨架屏
@@ -828,18 +901,31 @@ async function translateView(){
         const pending = [...new Set(collectTexts().filter(t => t && !seen[t]))];
         if (!pending.length) break;
         const map = await translateBatch(pending.slice(0, TR_CHUNK));
-        if (!Object.keys(map).length) break;
+        if (!Object.keys(map).length) {
+          // 一条都没翻出来：多半是通道熔断了，不要标记，等下一轮重试
+          break;
+        }
         st.tr = Object.assign(st.tr || {}, map);
         saveTrCache();
         if (st.tf !== view) { trDirty = true; break; }   // 已切走，稍后补跑新视图
-        if (BOARD.has(st.tf) && !st.q && st.pages) renderBoard(true);
-        else render();
+        applyTranslations();                             // 只改文本节点，不重建 DOM
         if (pending.length <= TR_CHUNK) break;
       }
     } while (trDirty && st.zh);
   } finally {
     trBusy = false;
   }
+}
+
+/* 译文落地：只替换 data-i18n 节点的文本，不重建整个列表。
+   整表重建会让已滚动的卡片高度变化、页面跳动，开发者栏头像还会重新加载闪烁。 */
+function applyTranslations(){
+  const tr = st.tr || {};
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const src = el.dataset.i18n;
+    const zh = tr[src];
+    if (zh && el.textContent !== zh) el.textContent = zh;
+  });
 }
 
 /* ---------- 详情页 ---------- */
@@ -1087,6 +1173,8 @@ function bindControls(){
 
 function resetPaging(){
   st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+  st.autoLoads = 0; st.needManual = false;
+  st.pagingToken = (st.pagingToken || 0) + 1;   // 作废进行中的翻页
   const l = $('#list'); if (l) l.dataset.rendered = '0';
 }
 
@@ -1199,8 +1287,11 @@ function openTabOrder(){
   openOrderView();
 }
 
-/* 只渲染界面，不碰历史栈 */
+/* 只渲染界面，不碰历史栈。草稿在这里兜底初始化，
+   否则直达 /#order 或前进后退回来时 orderDraft 为 null 会白屏。 */
 function openOrderView(){
+  if (!Array.isArray(orderDraft)) orderDraft = st.order.slice();
+  if (!(hiddenDraft instanceof Set)) hiddenDraft = new Set(st.hidden);
   document.body.classList.add('detail');
   $('#page').classList.add('on');
   $('#ptitle').textContent = '栏目排序';
@@ -1250,15 +1341,31 @@ function renderOrderPanel(){
       hiddenDraft = new Set();
       renderOrderPanel();
     } else if (ev.target.id === 'oDone') {
+      const prevTf = st.tf;
+      const prevOrder = st.order.join(',');
       st.order = orderDraft.slice();
       st.hidden = new Set(hiddenDraft);
       if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
       saveTabPrefs();
       buildControls();
-      // 面板是压了历史的，统一用 back 退出，保持栈平衡
-      if (history.state && history.state.v === 'order') history.back();
-      else closeDetail();
-      refresh(false);
+
+      const tfChanged = st.tf !== prevTf;
+      const orderChanged = st.order.join(',') !== prevOrder;
+
+      // 退出面板：用 back 保持栈平衡，但先把上一条记录的视图改写成当前真实视图，
+      // 否则 popstate 会带着旧的 {v:'topic'} 回来把栏目强行切回去
+      if (history.state && history.state.v === 'order') {
+        try {
+          history.replaceState({ v: tfChanged ? null : undefined }, '', location.pathname);
+        } catch(e) {}
+        history.back();
+      } else {
+        closeDetail();
+      }
+
+      // 只有栏目被隐藏/切换才需要重新拉数据，单纯调顺序不必清空分页
+      if (tfChanged) refresh(false);
+      else if (orderChanged) render();
     }
   };
 }

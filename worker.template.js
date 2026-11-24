@@ -45,6 +45,25 @@ async function cached(key, ttl, producer, ctx) {
    inflight 去重：冷启动并发请求不会同时下载并解析两遍 1.9MB JSON。 */
 const memData = new Map();     // tf -> { t, rows, g, periods, langs }
 const inflight = new Map();    // tf -> Promise
+/* 非榜单数据的实例内缓存。workers.dev 上 caches.default 是 no-op，
+   没有这层的话「热议/主题/热门/开发者/统计」每次都回源 trendshift.io。 */
+const memText = new Map();     // key -> { t, text }
+const MEM_MAX = 40;            // 上限，防 128MB 内存溢出
+
+function memGet(key) {
+  const hit = memText.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.t > hit.ttl * 1000) { memText.delete(key); return null; }
+  return hit.text;
+}
+function memSet(key, text, ttl) {
+  if (memText.size >= MEM_MAX) {
+    // 简单 FIFO 淘汰
+    const first = memText.keys().next().value;
+    if (first) memText.delete(first);
+  }
+  memText.set(key, { t: Date.now(), text, ttl });
+}
 
 function buildData(rows) {
   const g = groupBy(rows);
@@ -105,15 +124,21 @@ function langCatalog(rows) {
 
 /* ---------- 上游：官方页面 RSC 载荷 ---------- */
 async function rscText(path, ctx, ttl = CACHE_TTL) {
+  const mk = 'rsc:' + path;
+  const mem = memGet(mk);
+  if (mem) return mem;
   const res = await cached('https://ts.internal/rsc/' + path, ttl, async () => {
     const url = TS + '/' + path + (path.includes('?') ? '&' : '?') + '_rsc';
     const r = await fetch(url, {
       headers: { 'user-agent': UA, RSC: '1', accept: 'text/x-component' },
+      cf: { cacheTtl: ttl, cacheEverything: true },
     });
     if (!r.ok) throw new Error('rsc ' + path + ' ' + r.status);
     return await r.text();
   }, ctx);
-  return await res.text();
+  const text = await res.text();
+  memSet(mk, text, ttl);
+  return text;
 }
 
 /* RSC 是「<id>:<json>」逐行流；跳过模块引用行（I[...] / [..]） */
@@ -171,20 +196,36 @@ const unox = v => (v === '$undefined' || v === null || v === undefined) ? '' : v
 
 /* ---------- 官方 JSON 接口（无 CORS，必须代理） ---------- */
 async function tsJson(path, ctx, ttl = 3600) {
-  return await cached('https://ts.internal/api/' + path, ttl, async () => {
+  const mk = 'ts:' + path;
+  const mem = memGet(mk);
+  if (mem) return new Response(mem, {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+  const res = await cached('https://ts.internal/api/' + path, ttl, async () => {
     const r = await fetch(TS + path, {
       headers: { 'user-agent': UA, accept: 'application/json' },
+      cf: { cacheTtl: ttl, cacheEverything: true },
     });
     if (!r.ok) throw new Error('ts ' + path + ' ' + r.status);
     return await r.text();
   }, ctx);
+  const text = await res.text();
+  memSet(mk, text, ttl);
+  return new Response(text, {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
 }
 
 /* 热议：原站公开接口无 CORS，靠 Worker 代理 */
 async function mentions(ctx) {
-  return await cached('https://ts.internal/mentions', 300, async () => {
+  const mem = memGet('mentions');
+  if (mem) return new Response(mem, {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+  const res = await cached('https://ts.internal/mentions', 300, async () => {
     const r = await fetch(TS + '/api/social-mentions/latest', {
       headers: { 'user-agent': UA, accept: 'application/json' },
+      cf: { cacheTtl: 300, cacheEverything: true },
     });
     if (!r.ok) throw new Error('mentions ' + r.status);
     const rows = await r.json();
@@ -196,18 +237,180 @@ async function mentions(ctx) {
       })),
     };
   }, ctx);
+  const text = await res.text();
+  memSet('mentions', text, 300);
+  return new Response(text, {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
 }
 
-async function api(url, ctx) {
+/* ---------- Groq 翻译（主通道） ----------
+   一次请求翻译一整批，包括含换行的长文本（用 <|SPLIT|> 分隔，不依赖换行对齐）。
+   免费额度：1000 请求/日、8000 token/分钟、约 20 万 token/日。 */
+const GROQ_MODEL = 'qwen/qwen3.8-27b';     // 非推理模型，token 省、格式稳
+const GROQ_SPLIT = '<|SPLIT|>';
+
+/* ---- Gemini 多 key 轮换 ----
+   免费档硬限：单 key 10 RPM / 500 RPD / 250K 上下文。
+   单 key 10 RPM 对首屏 25 条明显不够，所以用多 key 轮流发，
+   每个 key 各自计数，撞 429 就换下一个，全撞了才降级。 */
+const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest'];
+const GEMINI_RPM = 10;
+
+function geminiKeys(env) {
+  const raw = (env && (env.GEMINI_KEYS || env.GEMINI_API_KEY)) || '';
+  return String(raw).split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+}
+
+/* 每个 key 的滑动窗口请求时刻，用来主动限速，减少撞 429 的概率 */
+const gqHits = new Map();
+function keyReady(k, now) {
+  const arr = (gqHits.get(k) || []).filter(t => now - t < 60000);
+  gqHits.set(k, arr);
+  return arr.length < GEMINI_RPM;
+}
+function markHit(k, now) {
+  const arr = gqHits.get(k) || [];
+  arr.push(now);
+  gqHits.set(k, arr);
+}
+
+async function geminiTranslate(texts, keys) {
+  if (!texts.length) return null;
+  if (!keys.length) throw new Error('no gemini key');
+
+  const sys = 'You are a translation engine. Translate each numbered item to Simplified Chinese. ' +
+    'Items may contain multiple lines; preserve their internal line breaks. ' +
+    'Separate output items with the exact marker ' + GROQ_SPLIT + ' on its own line. ' +
+    'Keep code identifiers, repo names, versions, URLs and product names unchanged. ' +
+    'No numbering, no commentary — output translations only.';
+  const user = texts.map((t, i) => (i + 1) + '. ' + t).join('\n' + GROQ_SPLIT + '\n');
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: sys + '\n\n' + user }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 4096 },
+  });
+
+  let lastErr = null;
+  const now = Date.now();
+  /* 优先挑这个分钟窗口内还有余量的 key，没有余量就按轮转顺序硬试 */
+  const order = keys.map((k, i) => ({ k, i })).sort((a, b) => {
+    const ra = keyReady(a.k, now) ? 0 : 1, rb = keyReady(b.k, now) ? 0 : 1;
+    return ra - rb || a.i - b.i;
+  });
+
+  for (const { k } of order) {
+    for (const model of GEMINI_MODELS) {
+      let r;
+      try {
+        r = await fetch(
+          'https://generativelanguage.googleapis.com/v1beta/models/' + model +
+          ':generateContent?key=' + encodeURIComponent(k),
+          { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': UA }, body });
+      } catch (e) { lastErr = e; continue; }
+
+      if (r.status === 429) { markHit(k, Date.now()); lastErr = new Error('gemini 429'); break; }
+      if (r.status === 404) { lastErr = new Error('gemini 404 ' + model); continue; }
+      if (!r.ok) { lastErr = new Error('gemini ' + r.status); break; }
+
+      const d = await r.json();
+      const cand = (d.candidates && d.candidates[0]) || {};
+      const out = ((cand.content && cand.content.parts) || []).map(x => x.text || '').join('');
+      let parts = out.split(GROQ_SPLIT).map(x => x.trim())
+        .map(x => x.replace(/^\d+[.、)]\s*/, ''));
+      if (parts.length !== texts.length) { lastErr = new Error('gemini align ' + parts.length + '/' + texts.length); continue; }
+      markHit(k, Date.now());
+      return parts;
+    }
+  }
+  throw lastErr || new Error('gemini failed');
+}
+
+async function groqTranslate(texts, key) {
+  if (!key || !texts.length) return null;
+  const sys = 'You are a translation engine. Translate each numbered item to Simplified Chinese. ' +
+    'Items may contain multiple lines; preserve their internal line breaks. ' +
+    'Separate output items with the exact marker ' + GROQ_SPLIT + ' on its own line. ' +
+    'Keep code identifiers, repo names, versions, URLs and product names unchanged. ' +
+    'No numbering, no commentary — output translations only.';
+  const user = texts.map((t, i) => (i + 1) + '. ' + t).join('\n' + GROQ_SPLIT + '\n');
+  const body = JSON.stringify({
+    model: GROQ_MODEL,
+    messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+    temperature: 0,
+    max_tokens: 4096,
+  });
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + key,
+      'content-type': 'application/json',
+      'user-agent': UA,
+    },
+    body,
+  });
+  if (!r.ok) throw new Error('groq ' + r.status);
+  const d = await r.json();
+  const out = (d.choices && d.choices[0] && d.choices[0].message &&
+    d.choices[0].message.content) || '';
+  let parts = out.split(GROQ_SPLIT).map(x => x.trim());
+  // 去掉模型可能加上的序号前缀
+  parts = parts.map(x => x.replace(/^\d+[.、)]\s*/, ''));
+  if (parts.length !== texts.length) throw new Error('groq align ' + parts.length + '/' + texts.length);
+  return parts;
+}
+
+async function api(url, ctx, env) {
   const p = url.searchParams;
   const path = url.pathname;
 
   if (path === '/api/mentions') return await mentions(ctx);
 
+  /* 翻译代理：Groq 优先（key 存 Worker secret，不进前端）。
+     ★ 译文缓存是刚需：免费额度只有 8000 token/分钟，
+       不缓存的话每次刷新都重翻，几分钟就打满。 */
+  if (path === '/api/tr') {
+    const raw = (p.get('t') || '').split('\u0001').filter(Boolean).slice(0, 30);
+    if (!raw.length) return json({ zh: [] }, 60);
+    if (!env) return json({ error: 'no key', zh: [] }, 60);
+
+    const zh = new Array(raw.length).fill('');
+    const missing = [];
+    for (let i = 0; i < raw.length; i++) {
+      const hit = memGet('tr:' + raw[i]);
+      if (hit) zh[i] = hit;
+      else missing.push(i);
+    }
+    if (!missing.length) return json({ zh, src: 'cache' }, 86400);
+
+    let src = 'gemini';
+    try {
+      let got;
+      const keys = geminiKeys(env);
+      try {
+        got = await geminiTranslate(missing.map(i => raw[i]), keys);
+      } catch (ge) {
+        src = 'groq';
+        got = await groqTranslate(missing.map(i => raw[i]), env && env.GROQ_API_KEY);
+      }
+      missing.forEach((idx, n) => {
+        const v = got[n];
+        if (v) { zh[idx] = v; memSet('tr:' + raw[idx], v, 30 * 86400); }
+      });
+      return json({ zh, src }, 86400);
+    } catch (e) {
+      // 部分命中也要返回，别让已翻好的白费
+      const partial = zh.some(Boolean);
+      return json({ error: String((e && e.message) || e), zh: partial ? zh : [] },
+        0, partial ? 200 : 502);
+    }
+  }
+
   /* --- 主题列表 --- */
   if (path === '/api/topics') {
     const text = await rscText('topics', ctx);
-    const hit = findOne(rscObjects(text), o => Array.isArray(o.tags) && o.tags.length > 3);
+    const hit = findOne(rscObjects(text), o =>
+      Array.isArray(o.tags) && o.tags.length > 3 &&
+      o.tags.every(t => t && typeof t === 'object' && t.display_name && t.slug));
     const topics = (hit ? hit.tags : []).map(t => ({ n: t.display_name, s: t.slug }));
     return json({ topics }, 3600);
   }
@@ -258,7 +461,8 @@ async function api(url, ctx) {
 
   /* --- 语言统计 --- */
   if (path === '/api/stats') {
-    const year = +(p.get('year') || new Date().getUTCFullYear()) || new Date().getUTCFullYear();
+    const cy = new Date().getUTCFullYear();
+    const year = Math.min(Math.max(+(p.get('year') || cy) || cy, 2020), cy + 1);
     const month = Math.min(Math.max(+(p.get('month') || new Date().getUTCMonth() + 1) || 1, 1), 12);
     const metric = p.get('metric') === 'forks' ? 'forks' : 'stars';
     const res = await tsJson('/api/stats/languages/monthly?year=' + year +
@@ -287,7 +491,9 @@ async function api(url, ctx) {
   }
 
   const lang = p.get('lang') || '';
-  const langRows = !lang || lang === 'all' ? rows : rows.filter(e => (e.language || 'Unknown') === lang);
+  const noFilter = !lang || lang === 'all';
+  // 无筛选时直接用预计算好的 g / periods，避免每次请求重跑 groupBy + 排序
+  const langRows = noFilter ? rows : rows.filter(e => (e.language || 'Unknown') === lang);
 
   if (path === '/api/repo') {
     const name = (p.get('name') || '').toLowerCase();
@@ -301,8 +507,6 @@ async function api(url, ctx) {
         latestHit = hit;                  // 循环结束即最新一期命中（或最后一次命中）
       }
     }
-    // 兜底：全量数据里再找一次（仓库可能在别的语言/期次出现过）
-    if (!latestHit) latestHit = rows.find(e => e.full_name.toLowerCase() === name) || null;
     if (!series.length && !latestHit) return json({ name, series: [], appeared: false }, 300, 404);
     return json({
       name, appeared: true, series,
@@ -314,9 +518,9 @@ async function api(url, ctx) {
 
   if (path === '/api/search') {
     const q = (p.get('q') || '').trim().toLowerCase();
-    const limit = Math.min(+(p.get('limit') || 40) || 40, 100);
+    const limit = Math.min(Math.max(+(p.get('limit') || 40) || 40, 1), 100);
     if (q.length < 2) return json({ q, items: [] }, 60);
-    const gl = groupBy(langRows);
+    const gl = noFilter ? g : groupBy(langRows);
     const seen = new Map();
     for (const k of periods) {
       for (const e of gl.get(k) || []) {
@@ -332,11 +536,11 @@ async function api(url, ctx) {
   }
 
   // /api/list
-  const gl = groupBy(langRows);
-  const available = [...gl.keys()].sort().reverse();
+  const gl = noFilter ? g : groupBy(langRows);
+  const available = noFilter ? periods : [...gl.keys()].sort().reverse();
   const period = p.get('period') || available[0];
   const sort = p.get('sort') || 'rank';
-  const limit = Math.min(+(p.get('limit') || 100) || 100, 100);
+  const limit = Math.min(Math.max(+(p.get('limit') || 100) || 100, 1), 100);
   const idx = available.indexOf(period);
   let items = (gl.get(period) || []).slice();
   if (sort === 'gain') items.sort((a, b) => (b.stars_gained || 0) - (a.stars_gained || 0));
@@ -355,10 +559,15 @@ async function api(url, ctx) {
 }
 
 addEventListener('fetch', event => {
-  event.respondWith(handle(event.request, event));
+  // service-worker 格式：每个 secret 是独立全局常量，这里聚合成对象
+  const env = {};
+  if (typeof GEMINI_KEYS !== 'undefined') env.GEMINI_KEYS = GEMINI_KEYS;
+  if (typeof GEMINI_API_KEY !== 'undefined') env.GEMINI_API_KEY = GEMINI_API_KEY;
+  if (typeof GROQ_API_KEY !== 'undefined') env.GROQ_API_KEY = GROQ_API_KEY;
+  event.respondWith(handle(event.request, event, env));
 });
 
-async function handle(request, event) {
+async function handle(request, event, env) {
   const url = new URL(request.url);
   if (request.method === 'OPTIONS') {
     return new Response(null, {
@@ -378,7 +587,7 @@ async function handle(request, event) {
   }
   if (url.pathname.startsWith('/api/')) {
     try {
-      return await api(url, event);
+      return await api(url, event, env);
     } catch (e) {
       // 必须用非 2xx：否则前端 api() 放行、sw 缓存错误对象、渲染时 undefined 崩溃
       return json({ error: String((e && e.message) || e) }, 0, 502);
