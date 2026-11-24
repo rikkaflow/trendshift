@@ -397,7 +397,6 @@ async function viaMyMemory(text){
 }
 
 /* 单条翻译：Google 优先，失败退 MyMemory */
-let googleDownUntil = 0;
 async function translateOne(text){
   const t = String(text).slice(0, 600);
   if (!t.trim()) return '';
