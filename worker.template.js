@@ -38,7 +38,13 @@ async function cached(key, ttl, producer, ctx) {
 }
 
 /* ---------- 上游：第三方镜像（趋势榜历史） ---------- */
+/* isolate 内存缓存：解析后的数组直接复用。
+   Edge Cache 只省了网络，1.9 MB 的 JSON.parse 仍然每次都跑（Workers 免费版 CPU 上限 10ms）。 */
+const memRows = new Map();   // tf -> { t, rows }
+
 async function allRows(tf, ctx) {
+  const hit = memRows.get(tf);
+  if (hit && Date.now() - hit.t < CACHE_TTL * 1000) return hit.rows;
   const res = await cached('https://ts.internal/up/' + tf, CACHE_TTL, async () => {
     const r = await fetch(UP + tf + '/' + tf + '-all.json', {
       headers: { 'user-agent': UA }, cf: { cacheTtl: CACHE_TTL, cacheEverything: true },
@@ -46,7 +52,9 @@ async function allRows(tf, ctx) {
     if (!r.ok) throw new Error('upstream ' + r.status);
     return await r.text();
   }, ctx);
-  return await res.json();
+  const rows = await res.json();
+  memRows.set(tf, { t: Date.now(), rows });
+  return rows;
 }
 
 function slim(e) {
@@ -257,7 +265,10 @@ async function api(url, ctx) {
   const periods = [...g.keys()].sort().reverse();
 
   if (path === '/api/langs') {
-    return json({ tf, langs: langCatalog(rows), periods: periods.length }, 1800);
+    const lk = 'https://ts.internal/langs/' + tf;
+    return await cached(lk, 1800, async () => ({
+      tf, langs: langCatalog(rows), periods: periods.length,
+    }), ctx);
   }
   if (path === '/api/periods') {
     return json({ tf, periods, count: rows.length }, 600);

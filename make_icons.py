@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """生成 PWA 图标：普通图标（带圆角）+ maskable（满背景、内容收进安全区）。"""
+import pathlib
 from PIL import Image, ImageDraw
 
 BG = (11, 13, 18)
@@ -49,8 +50,11 @@ jobs = [
     ('icon-512.png', 512, False),
     ('icon-512-maskable.png', 512, True),
 ]
-base = '/var/minis/workspace/trendshift-app/'
+SS = 4  # 超采样倍数：先按 4 倍尺寸画，再 LANCZOS 缩小，消除折线锯齿
+out = pathlib.Path(__file__).resolve().parent
 for name, size, mk in jobs:
-    im = draw(size, mk)
-    im.save(base + name, optimize=True)
-    print('wrote', name, im.size)
+    big = draw(size * SS, mk)
+    im = big.resize((size, size), Image.Resampling.LANCZOS)
+    im = im.convert('P', palette=Image.ADAPTIVE, colors=96)
+    im.save(out / name, optimize=True)
+    print('wrote', name, im.size, '(supersampled x%d)' % SS)

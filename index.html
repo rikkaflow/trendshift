@@ -7,6 +7,7 @@
 <meta name="theme-color" content="#0b0d12">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
   --bg:#0b0d12; --card:#151922; --card2:#1b2029; --line:#242a35;
@@ -214,6 +215,7 @@ const st = {
   metric:'stars', statYear:null, statMonth:null,
   order: null, hidden: null, mcache: null,
   pages: null, periodsLeft: null, hasMore: false, loading: false,
+  repoToken: 0,
 };
 /* 标签顺序与隐藏项（本地持久化） */
 function loadTabPrefs(){
@@ -298,31 +300,67 @@ function fetchWithTimeout(url, ms){
   return fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(timer));
 }
 
-async function translateOne(text){
-  const t = String(text).slice(0, 480);
-  if (!t.trim()) return '';
-  if (/[\u4e00-\u9fa5]/.test(t)) return t;   // 已是中文，别浪费请求
+/* 翻译链路：Google 批量优先（快、免费），失败退 MyMemory（单条、配额有限）。
+   MyMemory 每 IP 每天约 1000 词，所以连续失败 3 次就放弃这一轮，避免额度打光。 */
+function isShort(t){ return t.length <= 80 && !/[\n\r]/.test(t); }
+
+/* Google 被限流时会把请求 302 到 sorry 页，fetch 直接失败。
+   记住失败状态 5 分钟，避免每批都白等 7 秒超时。 */
+let googleDownUntil = 0;
+
+async function viaGoogle(chunk){
+  if (Date.now() < googleDownUntil) throw new Error('g skip');
   const u = 'https://translate.googleapis.com/translate_a/single' +
-    '?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(t);
-  const r = await fetchWithTimeout(u, 8000);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+    '?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk.join('\n'));
+  const r = await fetchWithTimeout(u, 4000);
+  if (!r.ok) { googleDownUntil = Date.now() + 5 * 60 * 1000; throw new Error('g ' + r.status); }
   const d = await r.json();
-  return (d[0] || []).map(x => x[0] || '').join('').trim();
+  const parts = (d[0] || []).map(x => x[0] || '').join('').split('\n');
+  if (parts.length !== chunk.length) return [];   // 对齐失败不当作封禁
+  return parts.map(x => (x || '').trim());
+}
+
+async function viaMyMemory(text){
+  const u = 'https://api.mymemory.translated.net/get?langpair=en|zh-CN&q=' +
+    encodeURIComponent(text.slice(0, 480));
+  const r = await fetchWithTimeout(u, 7000);
+  if (!r.ok) throw new Error('m ' + r.status);
+  const d = await r.json();
+  const v = d && d.responseData && d.responseData.translatedText;
+  if (!v || /MYMEMORY WARNING|QUOTA/i.test(v)) throw new Error('m quota');
+  if (/^[A-Za-z\s,.'"!?-]+$/.test(v)) return '';   // 没翻出来
+  return v;
 }
 
 async function translateBatch(texts){
   const uniq = [...new Set(texts.filter(Boolean))];
   if (!uniq.length) return {};
   const map = {};
-  const CONCURRENCY = 6;
-  for (let i = 0; i < uniq.length; i += CONCURRENCY) {
-    const chunk = uniq.slice(i, i + CONCURRENCY);
-    const got = await Promise.all(chunk.map(async src => {
-      try { return [src, await translateOne(src)]; }
-      catch(e) { return [src, '']; }
-    }));
-    for (const [src, zh] of got) if (zh && zh !== src) map[src] = zh;
+  let fails = 0;
+
+  const put = (src, zh) => { if (zh && zh !== src) map[src] = zh; };
+
+  /* 第一批：全部丢给 Google，批量最省请求 */
+  for (let i = 0; i < uniq.length; i += 12) {
+    const chunk = uniq.slice(i, i + 12);
+    try {
+      const out = await viaGoogle(chunk);
+      chunk.forEach((t, n) => put(t, out[n]));
+      fails = 0;
+    } catch(e) {
+      fails++;
+      if (!/skip/.test(String(e && e.message))) googleDownUntil = Date.now() + 5 * 60 * 1000;
+      // Google 不可用：短文本逐条走 MyMemory
+      const fallback = chunk.filter(isShort).slice(0, 12);
+      for (const t of fallback) {
+        try { put(t, await viaMyMemory(t)); fails = 0; }
+        catch(e2) { fails++; }
+      }
+      if (fails >= 20) return map;   // MyMemory 也大面积失败，放弃本轮
+    }
+    if (i + 12 < uniq.length) await new Promise(r => setTimeout(r, 250));
   }
+
   return map;
 }
 
@@ -467,20 +505,32 @@ function render(){
 
   buildPeriods(d.periods, d.period);
   if (!d.items.length) { $('#list').innerHTML = '<div class="empty">该筛选下暂无数据</div>'; return; }
-  renderBoard();
+  renderBoard(true);
 }
 
-/* 榜单累积渲染：st.pages 里每页是一期的 {period, items, prev} */
-function renderBoard(){
+/* 榜单累积渲染。full=true 整块重建（翻译更新/切筛选），false 时只追加新期次，
+   避免刷到第 10 期后每次触底都重绘几百张卡片。 */
+function pageHtml(pg){
+  return '<div class="pgroup" data-period="' + esc(pg.period) + '">' +
+    pg.items.map(e => card(e, pg.prev)).join('') + '</div>';
+}
+
+function renderBoard(full){
   const pages = st.pages || [];
-  if (!pages.length) return;
-  const html = pages.map(pg =>
-    '<div class="pgroup" data-period="' + esc(pg.period) + '">' +
-      pg.items.map(e => card(e, pg.prev)).join('') +
-    '</div>').join('');
-  // 底部只留一个不可见的哨兵，供 IntersectionObserver 监听，不显示任何文字
-  const tail = '<div id="loadmore" class="sentinel"></div>';
-  $('#list').innerHTML = html + tail;
+  const list = $('#list');
+  if (!pages.length) { list.innerHTML = ''; list.dataset.rendered = '0'; return; }
+
+  const rendered = +(list.dataset.rendered || 0);
+  const canAppend = !full && rendered > 0 && pages.length > rendered && $('#loadmore');
+
+  if (canAppend) {
+    const extra = pages.slice(rendered).map(pageHtml).join('');
+    $('#loadmore').insertAdjacentHTML('beforebegin', extra);
+  } else {
+    list.innerHTML = pages.map(pageHtml).join('') +
+      '<div id="loadmore" class="sentinel"></div>';
+  }
+  list.dataset.rendered = String(pages.length);
   armSentinel();
   syncPeriodSelect();
 }
@@ -504,7 +554,7 @@ async function loadMoreBoard(){
   if (!BOARD.has(st.tf) || st.q) return;
   st.loading = true;
   const next = (st.periodsLeft || [])[0];
-  if (!next) { st.hasMore = false; st.loading = false; renderBoard(); return; }
+  if (!next) { st.hasMore = false; st.loading = false; renderBoard(true); return; }
   try {
     const d = await api('api/list', {
       tf: st.tf, lang: st.lang, period: next, sort: st.sort, limit: 100,
@@ -514,7 +564,7 @@ async function loadMoreBoard(){
     }
     st.periodsLeft = (st.periodsLeft || []).filter(x => x !== next);
     st.hasMore = st.periodsLeft.length > 0;
-    renderBoard();
+    renderBoard(false);
   } catch(e) {
     // 静默失败：保持哨兵在视口外，用户继续下滑会再次触发
     st.loading = false;
@@ -570,7 +620,10 @@ function syncPeriodSelect(){
 }
 
 /* 轮询兜底：只在有更多内容时运行，页面隐藏时自动跳过，开销可忽略 */
-setInterval(checkNearBottom, 1200);
+setInterval(() => {
+  if (!BOARD.has(st.tf) || !st.hasMore || st.loading) return;
+  checkNearBottom();
+}, 1200);
 
 /* 统一取译：有译文用译文，否则原文 */
 function T(text){
@@ -641,6 +694,7 @@ async function refresh(force){
       st.periodsLeft = tail.slice(1);            // 剩余更早的
       st.hasMore = st.periodsLeft.length > 0;
       st.loading = false;
+      const ll = $('#list'); if (ll) ll.dataset.rendered = '0';
     }
     save('ts:last:' + st.tf + ':' + st.lang, st.data);
   } catch (e) {
@@ -653,6 +707,7 @@ async function refresh(force){
         st.periodsLeft = null;
         st.hasMore = false;
         st.loading = false;
+        const ll2 = $('#list'); if (ll2) ll2.dataset.rendered = '0';
       }
     } else {
       st.err = (e && e.message) || String(e);
@@ -711,7 +766,7 @@ async function translateView(){
       st.tr = Object.assign(st.tr || {}, map);
       saveTrCache();
       if (st.tf !== view) break;         // 用户已切走，别再往下翻
-      if (BOARD.has(st.tf) && !st.q && st.pages) renderBoard();
+      if (BOARD.has(st.tf) && !st.q && st.pages) renderBoard(true);
       else render();
       if (pending.length <= TR_CHUNK) break;
     }
@@ -743,7 +798,8 @@ function spark(series){
 function fmtDate(s){ return s ? String(s).slice(0, 10) : ''; }
 
 async function renderRepo(name){
-  const token = ++st.repoToken;          // 竞态令牌：慢请求回来时用户可能已看别的仓库
+  st.repoToken = (st.repoToken || 0) + 1;   // 必须从 0 起，否则 ++undefined=NaN 会永远不相等
+  const token = st.repoToken;             // 竞态令牌：慢请求回来时用户可能已看别的仓库
   st.cur = name;
   $('#ptitle').textContent = name;
   document.title = name + ' · Trendshift';
@@ -959,6 +1015,7 @@ function bindControls(){
 
 function resetPaging(){
   st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+  const l = $('#list'); if (l) l.dataset.rendered = '0';
 }
 
 function initStatsControls(){
@@ -1123,8 +1180,10 @@ function renderOrderPanel(){
       st.hidden = new Set(hiddenDraft);
       if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
       saveTabPrefs();
-      closeDetail();
       buildControls();
+      // 面板是压了历史的，统一用 back 退出，保持栈平衡
+      if (history.state && history.state.v === 'order') history.back();
+      else closeDetail();
       refresh(false);
     }
   };

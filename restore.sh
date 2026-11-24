@@ -1,11 +1,11 @@
 #!/bin/sh
 # 从 GitHub 或 bundle 恢复 Trendshift 源码，并校验完整性
 #
-# 用法：
-#   ./restore.sh github     # 从 GitHub 克隆（推荐，跨设备可用）
-#   ./restore.sh bundle     # 从本地 bundle 恢复（离线/无 token 时）
+# 用法：./restore.sh <目标目录> [github|bundle]
+#   ./restore.sh ./app github     # 从 GitHub 克隆（推荐，跨设备可用）
+#   ./restore.sh ./app bundle     # 从本地 bundle 恢复（离线时）
 #
-# 恢复后可直接 ./deploy.sh 重新部署。
+# 恢复后：cd ./app && ./deploy.sh
 set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
