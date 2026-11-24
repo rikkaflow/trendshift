@@ -1,5 +1,5 @@
-const CACHE = 'trendshift-v3';
-const SHELL = ['./index.html', './manifest.webmanifest',
+const CACHE = 'trendshift-v4';
+const SHELL = ['./', './index.html', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -39,10 +39,15 @@ self.addEventListener('fetch', e => {
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(
       fetch(req).then(r => {
-        const cp = r.clone();
-        caches.open(CACHE).then(c => c.put(req, cp));
+        // 只缓存成功响应：502/400 存进去会让离线时读出报错
+        if (r.ok) {
+          const cp = r.clone();
+          caches.open(CACHE).then(c => c.put(req, cp));
+        }
         return r;
-      }).catch(() => caches.match(req))
+      }).catch(() => caches.match(req).then(h => h || new Response('{"error":"offline"}', {
+        status: 503, headers: { 'content-type': 'application/json; charset=utf-8' },
+      })))
     );
   }
 });

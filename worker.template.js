@@ -40,21 +40,37 @@ async function cached(key, ttl, producer, ctx) {
 /* ---------- 上游：第三方镜像（趋势榜历史） ---------- */
 /* isolate 内存缓存：解析后的数组直接复用。
    Edge Cache 只省了网络，1.9 MB 的 JSON.parse 仍然每次都跑（Workers 免费版 CPU 上限 10ms）。 */
-const memRows = new Map();   // tf -> { t, rows }
+/* 预计算缓存：rows 之外还存 groupBy 结果、期次表、语言目录。
+   groupBy 要遍历数千行并排序，每次请求重跑会吃掉 Free Plan 的 10ms CPU。
+   inflight 去重：冷启动并发请求不会同时下载并解析两遍 1.9MB JSON。 */
+const memData = new Map();     // tf -> { t, rows, g, periods, langs }
+const inflight = new Map();    // tf -> Promise
 
-async function allRows(tf, ctx) {
-  const hit = memRows.get(tf);
-  if (hit && Date.now() - hit.t < CACHE_TTL * 1000) return hit.rows;
-  const res = await cached('https://ts.internal/up/' + tf, CACHE_TTL, async () => {
-    const r = await fetch(UP + tf + '/' + tf + '-all.json', {
-      headers: { 'user-agent': UA }, cf: { cacheTtl: CACHE_TTL, cacheEverything: true },
-    });
-    if (!r.ok) throw new Error('upstream ' + r.status);
-    return await r.text();
-  }, ctx);
-  const rows = await res.json();
-  memRows.set(tf, { t: Date.now(), rows });
-  return rows;
+function buildData(rows) {
+  const g = groupBy(rows);
+  const periods = [...g.keys()].sort().reverse();
+  return { t: Date.now(), rows, g, periods, langs: langCatalog(rows) };
+}
+
+async function allData(tf, ctx) {
+  const hit = memData.get(tf);
+  if (hit && Date.now() - hit.t < CACHE_TTL * 1000) return hit;
+  if (inflight.has(tf)) return await inflight.get(tf);
+
+  const p = (async () => {
+    const res = await cached('https://ts.internal/up/' + tf, CACHE_TTL, async () => {
+      const r = await fetch(UP + tf + '/' + tf + '-all.json', {
+        headers: { 'user-agent': UA }, cf: { cacheTtl: CACHE_TTL, cacheEverything: true },
+      });
+      if (!r.ok) throw new Error('upstream ' + r.status);
+      return await r.text();
+    }, ctx);
+    const data = buildData(await res.json());
+    memData.set(tf, data);
+    return data;
+  })();
+  inflight.set(tf, p);
+  try { return await p; } finally { inflight.delete(tf); }
 }
 
 function slim(e) {
@@ -186,7 +202,7 @@ async function api(url, ctx) {
   const p = url.searchParams;
   const path = url.pathname;
 
-  if (path === '/api/mentions') return json(await (await mentions(ctx)).json(), 300);
+  if (path === '/api/mentions') return await mentions(ctx);
 
   /* --- 主题列表 --- */
   if (path === '/api/topics') {
@@ -199,7 +215,7 @@ async function api(url, ctx) {
   /* --- 单个主题下的仓库 --- */
   if (path === '/api/topic') {
     const slug = (p.get('slug') || '').toLowerCase();
-    if (!/^[a-z0-9-]{2,60}$/.test(slug)) return json({ error: 'bad slug' }, 60);
+    if (!/^[a-z0-9-]{1,60}$/.test(slug)) return json({ error: 'bad slug' }, 0, 400);
     const text = await rscText('topics/' + slug, ctx, 1800);
     const hit = findOne(rscObjects(text), o => Array.isArray(o.initialRepositories));
     const items = (hit ? hit.initialRepositories : []).map(e => ({
@@ -242,7 +258,7 @@ async function api(url, ctx) {
 
   /* --- 语言统计 --- */
   if (path === '/api/stats') {
-    const year = +(p.get('year') || 2026) || 2026;
+    const year = +(p.get('year') || new Date().getUTCFullYear()) || new Date().getUTCFullYear();
     const month = Math.min(Math.max(+(p.get('month') || new Date().getUTCMonth() + 1) || 1, 1), 12);
     const metric = p.get('metric') === 'forks' ? 'forks' : 'stars';
     const res = await tsJson('/api/stats/languages/monthly?year=' + year +
@@ -258,17 +274,13 @@ async function api(url, ctx) {
 
   /* --- 趋势榜（第三方镜像） --- */
   const tf = p.get('tf') || 'daily';
-  if (!TFS.has(tf)) return json({ error: 'bad tf' }, 60);
+  if (!TFS.has(tf)) return json({ error: 'bad tf' }, 0, 400);
 
-  const rows = await allRows(tf, ctx);
-  const g = groupBy(rows);
-  const periods = [...g.keys()].sort().reverse();
+  const data = await allData(tf, ctx);
+  const rows = data.rows, g = data.g, periods = data.periods;
 
   if (path === '/api/langs') {
-    const lk = 'https://ts.internal/langs/' + tf;
-    return await cached(lk, 1800, async () => ({
-      tf, langs: langCatalog(rows), periods: periods.length,
-    }), ctx);
+    return json({ tf, langs: data.langs, periods: data.periods.length }, 1800);
   }
   if (path === '/api/periods') {
     return json({ tf, periods, count: rows.length }, 600);
@@ -279,18 +291,22 @@ async function api(url, ctx) {
 
   if (path === '/api/repo') {
     const name = (p.get('name') || '').toLowerCase();
-    if (!name) return json({ error: 'name required' }, 60);
+    if (!name) return json({ error: 'name required' }, 0, 400);
     const series = [];
-    for (const k of periods.slice().reverse()) {
+    let latestHit = null;                 // 最近一次上榜的条目（不一定是最新一期）
+    for (const k of periods.slice().reverse()) {   // 从最早期次往最新走
       const hit = (g.get(k) || []).find(e => e.full_name.toLowerCase() === name);
-      if (hit) series.push({ p: k, r: hit.rank, g: hit.stars_gained, s: hit.stars_total, sc: hit.score });
+      if (hit) {
+        series.push({ p: k, r: hit.rank, g: hit.stars_gained, s: hit.stars_total, sc: hit.score });
+        latestHit = hit;                  // 循环结束即最新一期命中（或最后一次命中）
+      }
     }
-    const last = (g.get(periods[0]) || []).find(e => e.full_name.toLowerCase() === name);
-    const anyHit = series.length ? null : rows.find(e => e.full_name.toLowerCase() === name);
-    if (!series.length && !anyHit) return json({ name, series: [], appeared: false }, 300);
+    // 兜底：全量数据里再找一次（仓库可能在别的语言/期次出现过）
+    if (!latestHit) latestHit = rows.find(e => e.full_name.toLowerCase() === name) || null;
+    if (!series.length && !latestHit) return json({ name, series: [], appeared: false }, 300, 404);
     return json({
       name, appeared: true, series,
-      latest: last ? slim(last) : (anyHit ? slim(anyHit) : null),
+      latest: latestHit ? slim(latestHit) : null,
       best: series.length ? Math.min(...series.map(x => x.r)) : null,
       periods: series.length, tf,
     }, 600);

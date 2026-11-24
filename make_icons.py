@@ -32,7 +32,7 @@ def draw(size, maskable=False):
         py = cx + (y - cx) * scale
         return (int(px * s), int(py * s))
 
-    w = max(2, int(s * (0.052 if maskable else 0.055)))
+    w = max(2, int(s * 0.055 * (scale if maskable else 1)))
     pts = [(0.22, 0.66), (0.40, 0.47), (0.55, 0.58), (0.72, 0.34), (0.80, 0.40)]
     Pp = [P(x, y) for x, y in pts]
     d.line(Pp, fill=ACC, width=w, joint='curve')
@@ -40,7 +40,7 @@ def draw(size, maskable=False):
         rr = w // 2
         d.ellipse([p[0] - rr, p[1] - rr, p[0] + rr, p[1] + rr], fill=ACC)
     tip = Pp[-1]
-    rr = int(s * (0.050 if maskable else 0.055) * (scale if maskable else 1))
+    rr = int(s * 0.055 * (scale if maskable else 1))
     d.ellipse([tip[0] - rr, tip[1] - rr, tip[0] + rr, tip[1] + rr], fill=GOOD)
     return img
 

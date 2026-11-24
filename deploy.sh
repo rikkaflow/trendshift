@@ -44,10 +44,18 @@ PY
 
 echo "→ 验证"
 sleep 2
-curl -s --noproxy '*' -m 25 https://trendshift-lite.logos7313.workers.dev/health
-echo
-curl -s --noproxy '*' -m 30 \
-  "https://trendshift-lite.logos7313.workers.dev/api/list?tf=weekly&lang=all&limit=2" \
-  | head -c 200
-echo
-echo "✓ 完成：https://trendshift-lite.logos7313.workers.dev/"
+B=https://trendshift-lite.logos7313.workers.dev
+# -sf：HTTP 非 2xx 直接失败，避免 Worker 报错时脚本仍打印「完成」
+if ! curl -sf --noproxy '*' -m 25 "$B/health" -o /tmp/_h.json; then
+  echo "✗ /health 检查失败" >&2; exit 1
+fi
+if ! grep -q '"ok":true' /tmp/_h.json; then
+  echo "✗ /health 返回内容异常" >&2; cat /tmp/_h.json; exit 1
+fi
+if ! curl -sf --noproxy '*' -m 30 "$B/api/list?tf=weekly&lang=all&limit=2" -o /tmp/_l.json; then
+  echo "✗ /api/list 检查失败" >&2; exit 1
+fi
+if ! grep -q '"items"' /tmp/_l.json; then
+  echo "✗ /api/list 返回内容异常" >&2; head -c 300 /tmp/_l.json; exit 1
+fi
+echo "✓ 完成：$B/"
