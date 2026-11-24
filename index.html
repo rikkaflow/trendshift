@@ -26,7 +26,8 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}
 .tabs::-webkit-scrollbar{display:none}
 .tab{padding:6px 13px;border-radius:999px;border:1px solid var(--line);
-  background:var(--card);color:var(--dim);font-size:13px;white-space:nowrap}
+  background:var(--card);color:var(--dim);font-size:13px;white-space:nowrap;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .tab.on{background:var(--acc);border-color:var(--acc);color:#0b0d12;font-weight:600}
 .row2{display:flex;gap:6px;margin-bottom:6px}
 .row2:last-child{margin-bottom:0}
@@ -344,10 +345,8 @@ function fetchWithTimeout(url, ms, opts){
     .finally(() => clearTimeout(timer));
 }
 
-/* 翻译链路：Google 批量优先，失败退 MyMemory（单条、配额有限）。
-   ★ 关键：批量拼接只对「单行短文本」安全。含换行的文本（推文、长简介）
-     拼进去后无法按 \n 拆回，必须单独请求。 */
-function isBatchable(t){ return t.length <= 120 && !/[\n\r]/.test(t); }
+/* 翻译链路：Google 单条优先，失败退 MyMemory（配额极小）。
+   Worker /api/tr 是主通道（一次翻一整批），这里只是它挂掉时的浏览器直连兜底。 */
 
 /* Google 熔断：只在 429/403（真限流）时触发，超时/超长不算 */
 let googleDownUntil = 0;
@@ -365,23 +364,6 @@ async function googleOne(text){
   const d = await r.json();
   // 单条不做换行拆分，直接拼回整段
   return (d[0] || []).map(x => x[0] || '').join('').trim();
-}
-
-/* 多条单行文本合并成一次请求，返回与输入等长的数组 */
-async function googleBatch(chunk){
-  if (Date.now() < googleDownUntil) throw new Error('g skip');
-  const u = 'https://translate.googleapis.com/translate_a/single' +
-    '?client=gtx&sl=en&tl=zh-CN&dt=t&q=' + encodeURIComponent(chunk.join('\n'));
-  const r = await fetchWithTimeout(u, 7000);
-  if (r.status === 429 || r.status === 403) {
-    googleDownUntil = Date.now() + 5 * 60 * 1000;
-    throw new Error('g ' + r.status);
-  }
-  if (!r.ok) throw new Error('g ' + r.status);
-  const d = await r.json();
-  const parts = (d[0] || []).map(x => x[0] || '').join('').split('\n');
-  if (parts.length !== chunk.length) throw new Error('g align');   // 对不齐就退单条
-  return parts.map(x => (x || '').trim());
 }
 
 async function viaMyMemory(text){
@@ -431,13 +413,17 @@ const KANA = /[\u3040-\u30ff]/;     // 日文假名
 const HANGUL = /[\uac00-\ud7af]/;    // 韩文
 
 /* 只有「本来就是中文」才跳过翻译。
-   不能只看有没有汉字：日文仓库简介含大量汉字，会被误判成中文而永远不翻。 */
+   ★ 判据必须与云端 cloud_sync.is_zh 逐条一致：不一致时，后台跳过的条目
+     会在前端每次刷新都被送去实时翻译（白耗额度，首屏还慢）。
+   ① 日文假名 / 韩文不按中文处理（日文简介里汉字很多，会被误判）
+   ② 含汉字即视为中文：中英混排里的英文基本都是 repo 名 / 版本号 / 产品名
+   ③ 有效英文单词 ≤ 4 视为纯专有名词（「Visual Studio Code」「SAM 3D Objects」） */
 function isChinese(t){
   if (!t) return false;
   if (KANA.test(t) || HANGUL.test(t)) return false;
-  const han = (t.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const latin = (t.match(/[A-Za-z]/g) || []).length;
-  return han > 0 && han >= latin;      // 汉字不少于拉丁字母，才认定是中文
+  if (CJK.test(t)) return true;
+  const words = t.match(/[A-Za-z][A-Za-z\-\.]{1,}/g) || [];
+  return words.length <= 4;
 }
 function needsTranslation(t){ return t && !isChinese(t); }
 
@@ -559,8 +545,8 @@ function renderTopic(d){
       '</div></article>').join('');
   const tb = $('#topicBack');
   if (tb) tb.onclick = () => {
-    /* 冷启动直达 #topic 时栈底就是这条记录，back 会直接退出应用 */
-    if (history.state && history.state.v && history.length > 1) history.back();
+    /* 冷启动直达 #topic 时栈底就是这条记录（_d 未定义），back 会直接退出应用 */
+    if (history.state && history.state.v && ((history.state._d) || 0) > 1) history.back();
     else {
       try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
       st.topicSlug = null;
@@ -742,17 +728,21 @@ async function loadMoreBoard(){
     });
     // 翻页期间用户可能切了栏目/语言
     if (pToken !== (st.pagingToken || 0) || !st.pages) { st.loading = false; return; }
+    let added = 0;
     if (d.items && d.items.length) {
       st.pages.push({ period: d.period || next, items: d.items, prev: d.prev || {} });
+      added = d.items.length;
       /* 一页装满（≥20 条）说明是正常榜单，重置计数；
          只累计「空拉」次数，这才是请求风暴的真实信号 */
-      st.autoLoads = d.items.length >= 20 ? 0 : (st.autoLoads || 0) + 1;
+      st.autoLoads = added >= 20 ? 0 : (st.autoLoads || 0) + 1;
     } else {
       st.autoLoads = (st.autoLoads || 0) + 1;
     }
     st.periodsLeft = (st.periodsLeft || []).filter(x => x !== next);
     st.hasMore = st.periodsLeft.length > 0;
-    renderBoard(false);
+    /* 空期次没有新增页时不要渲染：pages.length 没变，renderBoard(false)
+       会掉进 else 分支把已滚动的几百张卡片整块重建（闪烁且滚动位置丢失）。 */
+    if (added) renderBoard(false);
   } catch(e) {
     // 静默失败：保持哨兵在视口外，用户继续下滑会再次触发
     st.loading = false;
@@ -764,8 +754,17 @@ async function loadMoreBoard(){
 }
 
 let lastCheck = 0;
-window.addEventListener('scroll', () => {
+let lastSync = 0;
+/* 期次选择器跟随时要读每张卡片的 getBoundingClientRect()，是强制布局。
+   scroll 事件每帧都来，直接调用会造成周期性回流；150ms 节流足够跟手。 */
+function scheduleSyncPeriod(){
+  const now = Date.now();
+  if (now - lastSync < 150) return;
+  lastSync = now;
   syncPeriodSelect();
+}
+window.addEventListener('scroll', () => {
+  scheduleSyncPeriod();
   const now = Date.now();
   if (now - lastCheck < 300) return;
   lastCheck = now;
@@ -776,7 +775,7 @@ function checkNearBottom(){
   // 详情/排序面板打开时 header 与 main 都 display:none，scrollHeight 会塌缩，
   // 定时器会误判「到底了」而疯狂加载旧期次，必须挡掉
   if (document.body.classList.contains('detail')) return;
-  syncPeriodSelect();
+  scheduleSyncPeriod();
   if (!st.hasMore || st.loading || st.needManual || !BOARD.has(st.tf) || st.q) return;
   const remain = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
   if (remain < 700) loadMoreBoard();
@@ -932,20 +931,37 @@ function collectTexts(){
   return out;
 }
 
-/* 译文缓存：跨会话复用，避免每次打开重翻。上限 800 条防爆 */
+/* 译文缓存：分两层。
+     st.trTable  — 构建期/KV 的全站表（只读，几千条，绝不进 localStorage）
+     st.trLocal  — 本机实时通道新增的少量文本（进 localStorage，跨会话复用）
+     st.tr       — 合并后的查询表
+   ★ 不能把全量表写进 localStorage：1880+ 条 ≈ 390 KB，云端每天增量，
+     早晚顶爆 5 MB 配额（配额满时 save() 的兜底会清掉所有 ts:last:* 离线快照）。
+   ★ 更不能超 800 条就截断 st.tr 本身：旧实现这么干，
+     第一次实时翻译后内存表只剩最近 800 条，滚动到旧期次整片变回英文。 */
 const TR_KEY = 'ts:trcache';
+const TR_LOCAL_MAX = 600;
+function mergeTr(map){
+  if (!map) return;
+  st.tr = Object.assign(st.tr || {}, map);
+  st.trLocal = Object.assign(st.trLocal || {}, map);
+}
 function saveTrCache(){
-  const all = Object.entries(st.tr || {});
-  if (all.length > 800) st.tr = Object.fromEntries(all.slice(-800));
-  save(TR_KEY, st.tr);
+  const all = Object.entries(st.trLocal || {});
+  if (all.length > TR_LOCAL_MAX) {
+    st.trLocal = Object.fromEntries(all.slice(-TR_LOCAL_MAX));
+  }
+  save(TR_KEY, st.trLocal);
 }
 function loadTrCache(){
   const c = read(TR_KEY);
-  st.tr = (c && typeof c === 'object') ? c : {};
+  st.trLocal = (c && typeof c === 'object' && !Array.isArray(c)) ? c : {};
+  st.tr = Object.assign({}, st.trLocal);
 }
 
 /* 构建期生成的静态译表：全站几千条文本一次翻好，前端只查表。
-   这是主通道；本地缓存 st.tr 只是补最近新出现、表里还没有的文本。 */
+   这是主通道；本地缓存只是补最近新出现、表里还没有的文本。
+   云端表优先（质量高、每天更新），本地独有的条目保留。 */
 let trTableLoaded = false;
 async function loadTrTable(){
   if (trTableLoaded) return;
@@ -955,8 +971,11 @@ async function loadTrTable(){
     if (!r.ok) throw new Error('tr ' + r.status);
     const table = await r.json();
     if (table && typeof table === 'object') {
-      st.tr = Object.assign(table, st.tr || {});   // 本地缓存优先（可能更新）
-      save(TR_KEY, st.tr);
+      st.tr = Object.assign({}, st.trLocal || {}, table);
+      /* 表晚于首屏到达：原地替换文本节点，不重建 DOM。
+         首屏因此不用等一个完整 RTT（弱网下这就是白屏和立刻出内容的差别）。 */
+      if (st.data) applyTranslations();
+      translateView();
     }
   } catch(e) {
     /* 表拿不到就退回实时翻译，功能不中断 */
@@ -991,7 +1010,7 @@ async function translateView(){
           // 一条都没翻出来：多半是通道熔断了，不要标记，等下一轮重试
           break;
         }
-        st.tr = Object.assign(st.tr || {}, map);
+        mergeTr(map);
         saveTrCache();
         if (st.tf !== view) { trDirty = true; break; }   // 已切走，稍后补跑新视图
         applyTranslations();                             // 只改文本节点，不重建 DOM
@@ -1049,8 +1068,10 @@ async function renderRepo(name){
   body.innerHTML = '<div class="empty">加载中…</div>';
   body.scrollTop = 0;
 
-  // topics/ghtrend/devs/stats 都不是 Worker 认的周期值，必须回退
-  const qs = { name, tf: BOARD.has(st.tf) ? st.tf : 'weekly' };
+  /* topics/ghtrend/devs/stats/mentions 都不是榜单周期：
+     传 all 让 Worker 按 weekly→daily→monthly→yearly 找第一个有记录的榜。
+     硬回退 weekly 会让「只在 daily 上过榜」的仓库直接 404。 */
+  const qs = { name, tf: BOARD.has(st.tf) ? st.tf : 'all' };
   const [repo, gh] = await Promise.all([
     api('api/repo', qs).catch(e => ({ error: e.message })),
     ghInfo(name),
@@ -1140,10 +1161,21 @@ async function renderRepo(name){
 
   // 没有现成译文时自动翻译一次，避免停在「正在翻译…」假死
   if (!descZh && st.zh && descEn) {
+    /* 拿不到译文时的回落：原文本来就是中文 / 被「纯专有名词」判据跳过 /
+       翻译通道熔断。三种情况下都不能让界面永远停在「正在翻译…」，
+       按钮也必须回到可点的「看中文」（旧实现直接 return，界面卡死且文案是反的）。 */
+    const fail = () => {
+      if (st.cur !== name) return;
+      const note = document.querySelector('.tr-note span');
+      const btn = $('#trtoggle');
+      if (note) note.textContent = '原文';
+      if (btn) btn.textContent = '看中文';
+    };
     translateBatch([descEn]).then(map => {
+      if (st.cur !== name) return;      // 用户已离开
       const got = map[descEn];
-      if (!got || st.cur !== name) return;      // 用户已离开
-      st.tr = Object.assign(st.tr || {}, map);
+      if (!got) { fail(); return; }
+      mergeTr(map);
       saveTrCache();
       descZh = got;
       const el = $('#ddesc');
@@ -1152,7 +1184,7 @@ async function renderRepo(name){
       if (note) note.textContent = '机器翻译';
       const btn = $('#trtoggle');
       if (btn) btn.textContent = '看原文';
-    }).catch(() => {});
+    }).catch(fail);
   }
 
   const tt = $('#trtoggle');
@@ -1178,7 +1210,7 @@ async function renderRepo(name){
     const m = await translateBatch([descEn]);
     if (st.cur !== name) return;              // 用户已切到别的仓库
     descZh = m[descEn] || '';
-    st.tr = Object.assign(st.tr || {}, m);
+    mergeTr(m);
     if (descZh) saveTrCache();
     $('#ddesc').textContent = descZh || descEn;
     tt.textContent = descZh ? '看原文' : '翻译失败';
@@ -1203,8 +1235,9 @@ async function loadLangs(){
       st.langs.map(l => '<option value="' + esc(l.name) + '">' + esc(l.name) +
         ' (' + l.count + ')</option>').join('');
     sel.value = st.lang || '';
-    /* 语言被自动回退后必须重拉列表，否则下拉框显示「全部语言」而列表还是空 */
-    if (langReset && st.lang !== prevLang) refresh(false);
+    /* 语言被自动回退后必须重拉列表，否则下拉框显示「全部语言」而列表还是空。
+       重拉前要作废进行中的翻页，否则旧语言的下一页会插进新列表。 */
+    if (langReset && st.lang !== prevLang) { resetPaging(); refresh(false); }
   } catch(e) {
     if (token === langsToken) st.langs = null;
   }
@@ -1225,11 +1258,12 @@ function buildControls(){
 
 /* 事件只在这里绑一次（原来放在 buildControls 里，每切一次标签就多绑一组） */
 function bindControls(){
-  let pressTimer = null, pressed = false;
+  let pressTimer = null, pressed = false, downX = 0, downY = 0;
 
   $('#tabs').addEventListener('pointerdown', ev => {
     const b = ev.target.closest('.tab'); if (!b) return;
     pressed = false;
+    downX = ev.clientX; downY = ev.clientY;
     pressTimer = setTimeout(() => {
       pressed = true;
       pressTimer = null;
@@ -1237,7 +1271,15 @@ function bindControls(){
       openTabOrder();
     }, 500);
   });
-  const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  /* 触屏长按必然伴随 1~3px 手指抖动：pointermove 一触发就取消，
+     实际手机上长按几乎不可能成功。只有明显移动（>8px = 滚动/滑动手势）才取消。 */
+  const cancelPress = ev => {
+    if (!pressTimer) return;
+    if (ev && ev.type === 'pointermove' &&
+        Math.hypot(ev.clientX - downX, ev.clientY - downY) <= 8) return;
+    clearTimeout(pressTimer);
+    pressTimer = null;
+  };
   ['pointerup', 'pointercancel', 'pointermove'].forEach(t =>
     $('#tabs').addEventListener(t, cancelPress));
 
@@ -1324,6 +1366,7 @@ function renderMention(m){
   const body = m.text || '';
   let zh = st.zh ? (st.tr || {})[body] : '';     // 必须是 let：异步译文到达后要回写
   let showing = zh ? 'zh' : 'src';
+  let userToggled = false;                       // 用户手动切过的话，异步结果不抢视图
 
   const paint = () => {
     const shown = showing === 'zh' ? (zh || body) : body;
@@ -1354,6 +1397,7 @@ function renderMention(m){
       + '应用内不再直接跳转 x.com，避免系统弹出「在应用中查看此帖子」。</div>';
 
   $('#mswitch').onclick = () => {
+    userToggled = true;
     showing = showing === 'zh' ? 'src' : 'zh';
     paint();
   };
@@ -1376,20 +1420,14 @@ function renderMention(m){
     translateBatch([body]).then(map => {
       const got = map[body];
       if (!got) return;
-      st.tr = Object.assign(st.tr || {}, map);
+      mergeTr(map);
       saveTrCache();
       if (st.cur !== m.id) return;      // 用户已离开
-      const p = $('#mtext');
-      if (p && showing === 'src') { /* 保持原文，等用户切换 */ }
-      const b = $('#mswitch');
-      if (b) b.textContent = '看中文';
-      const tag = $('#mtag');
-      if (tag) tag.textContent = '原文';
       zh = got;                          // ★ 回写闭包，否则「看原文」后再也切不回中文
-      showing = 'zh';
-      if (p) p.textContent = got;
-      if (tag) tag.textContent = '机器翻译';
-      if (b) b.textContent = '看原文';
+      /* 用户没手动切过才自动显示译文；已经切到「原文」的意图要保留。
+         （旧实现先写死「看中文/原文」再立刻覆盖成翻译态，属于互相打架的死代码。） */
+      if (!userToggled) showing = 'zh';
+      paint();
     });
   }
 }
@@ -1470,13 +1508,27 @@ function renderOrderPanel(){
       const tfChanged = st.tf !== prevTf;
       const orderChanged = st.order.join(',') !== prevOrder;
 
-      /* 退出面板。三种情况要分开处理：
-         ① 栈里还有上一条记录 → 先把当前这条改写成「无状态」，再 back，
-            否则 popstate 会带着旧的 {v:'topic'} 把刚隐藏的栏目切回来
-         ② 冷启动直达 #order（栈底就是它）→ back 会直接退出应用，改用 replaceState
-         ③ 不在 order 视图里 → 直接关面板 */
+      /* 切/隐藏栏目等于回到列表根：残留的二级页状态（主题 slug、选定期次、
+         搜索词）必须一起清掉。否则 st.period 还是旧栏目的期次键
+         （如 weekly 的 2026-W48 传给 daily），Worker 查不到 → 空列表。 */
+      if (tfChanged) {
+        st.topicSlug = null;
+        st.period = null;
+        st.q = '';
+        const qe = $('#q'); if (qe) qe.value = '';
+        resetPaging();
+        loadLangs();          // 从 topics/热搜切回榜单时语言下拉需要重建
+      }
+
+      /* 退出面板。两种路径：
+         ① 栈里有上一条（_d > 1）→ 先把当前条改写成「无状态」再 back
+         ② 冷启动直达 #order（_d 未定义）→ back 会退出应用，直接关面板
+         「上一条指向被隐藏栏目」的降级由 renderState() 统一处理，
+         这里不再猜上一条是什么（旧实现改成 {v:null} 再 back，结果被 popstate
+         带回刚隐藏的主题页）。 */
       const isOrderState = history.state && history.state.v === 'order';
-      if (isOrderState && history.length > 1) {
+      const depth = (history.state && history.state._d) || 0;
+      if (isOrderState && depth > 1) {
         try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
         history.back();
       } else if (isOrderState) {
@@ -1508,6 +1560,8 @@ function closeDetail(){
   document.body.classList.remove('detail');
   st.cur = null;
   document.title = 'Trendshift';
+  const pb = $('#pbody');
+  if (pb) pb.onclick = null;    // 排序面板绑的委托事件不该跨视图残留
   window.scrollTo(0, st.listScroll || 0);
 }
 
@@ -1541,6 +1595,9 @@ function renderState(state){
     return;
   }
   if (state.v === 'topic') {
+    /* 该栏目可能已在排序面板里被隐藏：不能再进二级页，
+       否则「完成」的 back 会把用户带回刚隐藏的栏目。 */
+    if (st.hidden && st.hidden.has('topics')) { renderState(null); return; }
     const already = st.tf === 'topics' && st.topicSlug === state.slug &&
       st.data && st.data.topic && st.data.topic.slug === state.slug;
     closeDetail();
@@ -1568,8 +1625,13 @@ function hashOf(state){
 function go(state){
   // 只在列表页记录滚动位置；从详情页里跳（如热议→看仓库）不能覆盖
   if (!document.body.classList.contains('detail')) st.listScroll = window.scrollY || 0;
-  try { history.pushState(state, '', hashOf(state)); } catch(e) {}
-  renderState(state);
+  /* _d = 本应用实际压过的历史深度。不能用 history.length 判断「有没有上一页」：
+     它把进站前的页面（Telegram / Google）也计入，从外链冷启动时 length ≥ 2，
+     返回键会直接离开应用而不是回到列表。 */
+  const depth = ((history.state && history.state._d) || 0) + 1;
+  const next = Object.assign({}, state, { _d: depth });
+  try { history.pushState(next, '', hashOf(next)); } catch(e) {}
+  renderState(next);
 }
 
 /* 列表点击分发 */
@@ -1590,7 +1652,7 @@ $('#list').addEventListener('click', ev => {
 
 /* 返回键：一律交给浏览器，统一走 popstate */
 $('#back').onclick = () => {
-  if (history.state && history.state.v) history.back();
+  if (history.state && history.state.v && ((history.state._d) || 0) > 1) history.back();
   else renderState(null);
 };
 
@@ -1598,7 +1660,8 @@ window.addEventListener('popstate', () => {
   renderState(history.state);
 });
 
-/* 冷启动带 hash 直达；replaceState 让返回键直接退出而不是回到同一视图 */
+/* 冷启动带 hash 直达；replaceState 让返回键直接退出而不是回到同一视图。
+   返回 true = 已经在渲染目标视图（不需要再拉默认 weekly 列表）。 */
 function openFromHash(){
   const h = location.hash || '';
   let state = null;
@@ -1607,14 +1670,16 @@ function openFromHash(){
   else if ((m = /^#mention=(.+)$/.exec(h))) state = { v: 'mention', id: decodeURIComponent(m[1]) };
   else if ((m = /^#topic=(.+)$/.exec(h))) state = { v: 'topic', slug: decodeURIComponent(m[1]) };
   else if (h === '#order') state = { v: 'order' };
-  if (!state) return;
+  if (!state) return false;
+  /* 不带 _d：这是本应用的第一条历史，返回键应该退出而不是回到栈里更早的站外页面 */
   try { history.replaceState(state, '', h); } catch(e) {}
   if (state.v === 'mention') {
     // 冷启动时热议数据还没拉回来，等第一轮 refresh 完成再渲染
     st.pendingState = state;
-    return;
+    return false;                    // mention 需要 refresh 才有数据
   }
   renderState(state);
+  return true;
 }
 
 loadTabPrefs();
@@ -1622,12 +1687,14 @@ loadTrCache();
 buildControls();
 bindControls();
 initStatsControls();
-/* 译表先就位再拉列表：这样首屏渲染出来就是中文，不会先闪英文再跳 */
-loadTrTable().finally(() => {
-  loadLangs();
-  refresh(false);
-  openFromHash();
-});
+/* 译表与列表并行：首屏立刻出骨架屏/英文，tr.json 到位后 applyTranslations()
+   原地替换文本节点。弱网下不再为了一份 390 KB 的译表把整页卡住。
+   （原来 loadTrTable().finally(...) 串行，正常网络也白等一个完整 RTT。） */
+loadTrTable();
+loadLangs();
+/* 带 hash 冷启动时由 openFromHash() 自己拉目标视图的数据，
+   否则会先白拉一轮 weekly（目标还是 topic 时甚至要拉两次）。 */
+if (!openFromHash()) refresh(false);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

@@ -31,6 +31,11 @@ def main():
         'bindings': [
             {'type': 'kv_namespace', 'name': 'TR_KV', 'namespace_id': KV_ID},
         ],
+        # ★ 必须显式保留 secret 类绑定：一旦上传时提供了 bindings 列表，
+        #   不写 keep_bindings 就会把脚本原有的 secret（GEMINI_KEYS / GROQ_API_KEY）
+        #   一并删除——线上 /api/tr 会静默变成 503 {"error":"no key"}，
+        #   而旧版 deploy.sh 只验 /health、/api/list、/tr.json，三项全过。
+        'keep_bindings': ['secret_text', 'secret_key'],
         'compatibility_date': '2024-11-01',
     }
 

@@ -1,4 +1,4 @@
-const CACHE = 'trendshift-v5';
+const CACHE = 'trendshift-v6';
 
 /* 弱网/假连接时 fetch 可能长时间不返回，用户会被卡在骨架屏 */
 function withTimeout(promise, ms){
@@ -12,7 +12,11 @@ const SHELL = ['./', './index.html', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  /* cache: 'no-cache' 强制回源校验：默认缓存模式下，5 分钟内连续部署
+     会把旧版 index.html 装进新 SW 的预缓存里。 */
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'no-cache' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -30,8 +34,11 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
 
   if (url.origin === location.origin && !url.pathname.startsWith('/api/')) {
+    /* ★ 这里必须带超时：同源静态资源（含 tr.json）走网络优先，
+       弱网「连上了但不通」时 fetch 会死等到浏览器/系统超时（可达 20 秒以上），
+       期间整页停在骨架屏。4 秒拿不到就先用缓存，后台照常更新。 */
     e.respondWith(
-      fetch(req).then(r => {
+      withTimeout(fetch(req), 4000).then(r => {
         if (r.ok) {
           const cp = r.clone();
           caches.open(CACHE).then(c => c.put(req, cp));
