@@ -18,12 +18,12 @@ if [ -z "$DEST" ]; then
 fi
 
 if [ "$MODE" = "bundle" ]; then
-  for cand in "$HERE/trendshift-v6.2.bundle" "$HERE/backup/trendshift-v6.2.bundle" \
-              "$HERE/../backup/trendshift-v6.2.bundle"; do
+  for cand in "$HERE/trendshift-v6.3.bundle" "$HERE/backup/trendshift-v6.3.bundle" \
+              "$HERE/../backup/trendshift-v6.3.bundle"; do
     [ -f "$cand" ] && BUNDLE="$cand" && break
   done
   [ -n "$BUNDLE" ] || {
-    echo "找不到 trendshift-v6.2.bundle（bundle 不进 git，需从备份目录复制）" >&2
+    echo "找不到 trendshift-v6.3.bundle（bundle 不进 git，需从备份目录复制）" >&2
     echo "改用：$0 <目录> github" >&2
     exit 1
   }
