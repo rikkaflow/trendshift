@@ -460,32 +460,30 @@ async function api(url, ctx, env, request) {
     } else {
       raw = (p.get('t') || '').split('\u0001');
     }
-    raw = raw.filter(Boolean).slice(0, TR_MAX_ITEMS)
-      .map(x => String(x).slice(0, TR_MAX_CHARS));
-    /* 总字符预算：全站 CORS 开放，不限长的话任何人可以用 40 条 100KB 文本
-       一次烧光 Gemini/Groq 免费额度。超预算直接截断，余下的留给下一轮。 */
+    /* ★ 返回数组长度必须与请求条数严格相等：前端用 d.zh.length === texts.length
+       校验对齐，少一个槽就会整批判为失败并熔断 15~60 秒。
+       所以超限的条目只能留空槽，不能过滤掉。 */
+    const n = Math.min(raw.length, TR_MAX_ITEMS);
     let budget = TR_MAX_TOTAL;
-    raw = raw.filter(x => {
-      if (budget <= 0) return false;
-      budget -= x.length;
-      return true;
-    });
-    if (!raw.length) return json({ zh: [] }, 60);
-
+    const zh = new Array(n).fill('');
+    const missing = [];
     const keys = geminiKeys(env);
     const hasGroq = !!(env && env.GROQ_API_KEY);
     if (!keys.length && !hasGroq) return json({ error: 'no key', zh: [] }, 60, 503);
 
-    const zh = new Array(raw.length).fill('');
-    const missing = [];
     /* 先查 KV 里的预翻译表（云端每天增量生成），再退到 isolate 缓存 */
     const kvTable = await kvTrTable(env);
-    for (let i = 0; i < raw.length; i++) {
-      const pre = kvTable ? kvTable[raw[i]] : null;
+    for (let i = 0; i < n; i++) {
+      const src0 = String(raw[i] || '');
+      if (!src0) continue;
+      const pre = kvTable ? kvTable[src0] : null;
       if (pre) { zh[i] = pre; continue; }
-      const hit = trGet(raw[i]);
-      if (hit) zh[i] = hit;
-      else missing.push(i);
+      const hit = trGet(src0);
+      if (hit) { zh[i] = hit; continue; }
+      /* 单条过长 / 总量超预算：留空槽，前端会走兜底，不会误判对齐失败 */
+      if (src0.length > TR_MAX_CHARS || budget < src0.length) continue;
+      budget -= src0.length;
+      missing.push(i);
     }
     if (!missing.length) return json({ zh, src: 'cache' }, 86400);
 
@@ -757,10 +755,13 @@ async function handle(request, event, env) {
     payload = buf;
   }
   const isIcon = url.pathname.startsWith('/icon');
+  /* HTML 外壳必须 no-cache：给 300s 的话，5 分钟内连续部署时浏览器 HTTP 缓存
+     会先把旧 index.html 交出去，SW 的网络优先也救不回来（它拿到的就是旧的）。 */
+  const isHtml = hit.type.startsWith('text/html');
   return new Response(request.method === 'HEAD' ? null : payload, {
     headers: {
       'content-type': hit.type,
-      'cache-control': url.pathname === '/sw.js' ? 'no-cache'
+      'cache-control': isHtml || url.pathname === '/sw.js' ? 'no-cache'
         : isIcon ? 'public, max-age=86400'
         : url.pathname === '/tr.json' ? 'public, max-age=86400' : 'public, max-age=300',
       'x-content-type-options': 'nosniff',

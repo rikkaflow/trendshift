@@ -1356,7 +1356,8 @@ function initStatsControls(){
   const now = new Date();
   const cy = now.getUTCFullYear();
   const cm = now.getUTCMonth() + 1;
-  const years = [cy, cy - 1, cy - 2];
+  /* 统计接口 2023 年就有数据；写死 3 年会让更早的月份无从选择 */
+  const years = [cy, cy - 1, cy - 2, cy - 3];
   $('#stYear').innerHTML = years.map(y =>
     '<option value="' + y + '"' + (y === cy ? ' selected' : '') + '>' + y + ' 年</option>').join('');
   const mons = Array.from({length: 12}, (_, i) => i + 1);
