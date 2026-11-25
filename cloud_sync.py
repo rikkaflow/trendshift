@@ -153,6 +153,8 @@ def kv_get(key):
     # 任何别的形态（API 错误体、数组、嵌套对象）都说明拿到的不是译表。
     if not isinstance(obj, dict):
         raise KvUnavailable('KV GET %s 返回的不是字典：%r' % (key, type(obj).__name__))
+    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in obj.items()):
+        raise KvUnavailable('KV GET %s 不是「字符串 → 字符串」译表' % key)
     if 'success' in obj and obj.get('success') is False:
         raise KvUnavailable('KV GET %s 返回 API 错误体：%s'
                             % (key, json.dumps(obj.get('errors'), ensure_ascii=False)[:200]))
@@ -169,7 +171,8 @@ def kv_put(key, obj):
     if code != 200:
         return False
     try:
-        return json.loads(out).get('success', False)
+        result = json.loads(out)
+        return result.get('success') is True
     except Exception:
         return False
 
@@ -358,12 +361,12 @@ def main():
                         log('    key#%d 限流，退避 %ds（第 %d 次）' % (idx + 1, wait, rate))
                         time.sleep(wait)
                         continue
-                    if not res:
-                        # 对不齐多半是批次太大被截断：对半拆开重试，最小 1 条
+                    if not isinstance(res, (list, tuple)) or len(res) != len(batch):
+                        # 对不齐或返回形状异常时对半拆分；不能 zip 后静默丢掉尾项。
                         if len(batch) > 1:
                             mid = len(batch) // 2
                             with lock:
-                                pending[0] += 2      # 两半重新排队
+                                pending[0] += 2
                             q.put(batch[:mid])
                             q.put(batch[mid:])
                             log('    key#%d 对不齐，拆成 %d+%d 重试'
@@ -374,14 +377,19 @@ def main():
                             log('    key#%d 单条失败，跳过' % (idx + 1))
                         break
                     new = 0
+                    failed = 0
                     with lock:
                         for src, zh in zip(batch, res):
-                            zh = zh.strip()
+                            zh = zh.strip() if isinstance(zh, str) else ''
                             if zh and zh != src:
                                 table[src] = zh
                                 new += 1
+                            else:
+                                failed += 1
                         added[0] += new
-                    log('    key#%d 完成一批 +%d，累计新增 %d' % (idx + 1, new, added[0]))
+                        fails[0] += failed
+                    log('    key#%d 完成一批 +%d / 失败 %d，累计新增 %d'
+                        % (idx + 1, new, failed, added[0]))
                     break
             finally:
                 with lock:
@@ -393,16 +401,16 @@ def main():
     log('5/5 写回 KV')
     if added[0] == 0 and not dirty:
         log('    没有新译文，跳过写入')
-        return 0
+        return 1 if fails[0] else 0
     if kv_put('tr.json', table):
         log('    写入成功，译表共 %d 条' % len(table))
     else:
         log('    写入失败')
         return 1
 
-    log('完成：新增 %d 条，总 %d 条，用时 %.0fs（失败批 %d）'
+    log('完成：新增 %d 条，总 %d 条，用时 %.0fs（失败条目 %d）'
         % (added[0], len(table), time.time() - t0, fails[0]))
-    return 0
+    return 1 if fails[0] else 0
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -344,6 +344,30 @@ const GEMINI_RPM = 10;
 const TR_MAX_ITEMS = 40;   // 单次翻译条目上限（前端按字符预算打包，通常 10~25 条）
 const TR_MAX_CHARS = 4000; // 单条文本上限（简介/推文都在 2000 以内）
 const TR_MAX_TOTAL = 20000; // 单次请求总字符预算
+const TR_MAX_BODY_BYTES = 256 * 1024; // 限制JSON解析前的请求体内存
+
+async function readBoundedText(request, maxBytes) {
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (declared > maxBytes) return null;
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    total += part.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(part.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder('utf-8').decode(bytes);
+}
 
 function geminiKeys(env) {
   const raw = (env && (env.GEMINI_KEYS || env.GEMINI_API_KEY)) || '';
@@ -475,19 +499,30 @@ async function api(url, ctx, env, request) {
   if (path === '/api/tr') {
     let raw = [];
     if (request.method === 'POST') {
-      try {
-        const body = await request.json();
-        if (body && Array.isArray(body.texts)) raw = body.texts.map(x => String(x || ''));
-      } catch (e) { return json({ error: 'bad json', zh: [] }, 0, 400); }
+      const payload = await readBoundedText(request, TR_MAX_BODY_BYTES);
+      if (payload === null) return json({ error: 'request body too large', zh: [] }, 0, 413);
+      let body;
+      try { body = JSON.parse(payload); }
+      catch (e) { return json({ error: 'bad json', zh: [] }, 0, 400); }
+      if (!body || !Array.isArray(body.texts)) return json({ error: 'texts must be an array', zh: [] }, 0, 400);
+      if (body.texts.length > TR_MAX_ITEMS) return json({ error: 'too many texts', zh: [] }, 0, 413);
+      if (body.texts.some(x => typeof x !== 'string')) return json({ error: 'texts must contain strings', zh: [] }, 0, 400);
+      raw = body.texts;
+    } else if (request.method === 'GET') {
+      raw = (p.get('t') || '').split('\\u0001');
     } else {
-      raw = (p.get('t') || '').split('\u0001');
+      return json({ error: 'method not allowed', zh: [] }, 0, 405);
     }
     /* ★ 返回数组长度必须与请求条数严格相等：前端用 d.zh.length === texts.length
        校验对齐，少一个槽就会整批判为失败并熔断 15~60 秒。
        所以超限的条目只能留空槽，不能截短数组 ——
        旧实现 `new Array(Math.min(raw.length, TR_MAX_ITEMS))` 让长度变成 40，
        与这条契约自相矛盾（注释写着「不能过滤掉」，代码却在截断）。 */
-    const n = Math.min(raw.length, TR_MAX_ITEMS);
+    if (raw.length > TR_MAX_ITEMS) return json({ error: 'too many texts', zh: [] }, 0, 413);
+    /* 总字符超预算时不拒绝整批：那会让前端整条翻译通道熔断 60 秒，
+       反而比「该条留空槽、前端逐条兜底」更糟。请求体已有 256 KiB 硬上限，
+       加上条数 ≤ 40，响应数组尺寸天然有界。 */
+    const n = raw.length;
     let budget = TR_MAX_TOTAL;
     const zh = new Array(raw.length).fill('');
     const missing = [];

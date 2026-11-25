@@ -54,42 +54,37 @@ console.log('[1] packBatches 单批不超过 TR_MAX_ITEMS');
 
 // ---- 抽 worker 的 /api/tr 槽位分配段，验证返回长度 == 请求长度 ----
 console.log('[2] /api/tr 返回数组长度 == 请求条数');
-const nDecl = tpl.match(/const n = Math\.min\(raw\.length, TR_MAX_ITEMS\);/);
-const zhDecl = tpl.match(/const zh = new Array\(([^)]*)\)\.fill\(''\);/);
-check('worker 存在 n 声明', !!nDecl);
-check('worker 的 zh 按 raw.length 分配（不是 n）', !!zhDecl && zhDecl[1].trim() === 'raw.length',
-  zhDecl ? 'actual=' + zhDecl[1].trim() : 'not found');
+check('请求条数限制在响应分配前执行', /if \(raw\.length > TR_MAX_ITEMS\)[\s\S]*?const zh = new Array\(raw\.length\)\.fill\(''\);/.test(tpl));
+check('非字符串条目不会被静默转成字符串', /body\.texts\.some\(x => typeof x !== 'string'\)/.test(tpl));
+check('请求体在JSON解析前有硬上限', /readBoundedText\(request, TR_MAX_BODY_BYTES\)/.test(tpl));
 
-// 行为级：模拟该段逻辑
+// 行为级：模拟契约——超过上限拒绝；合法长度逐槽对应
 const TR_MAX_ITEMS = +(tpl.match(/const TR_MAX_ITEMS = (\d+);/) || [0, 40])[1];
 function simulate(raw) {
-  const n = Math.min(raw.length, TR_MAX_ITEMS);
-  const zh = new Array(raw.length).fill('');
-  for (let i = 0; i < n; i++) zh[i] = 'zh' + i;   // 只有前 n 条被翻译
-  return zh;
+  if (raw.length > TR_MAX_ITEMS) return { status: 413, zh: [] };
+  return { status: 200, zh: raw.map(() => 'zh') };
 }
 {
   const raw = Array.from({ length: 64 }, (_, i) => 'text ' + i);
-  const zh = simulate(raw);
-  check('64 条请求 → 返回 64 槽', zh.length === 64, 'len=' + zh.length);
-  check('前 40 槽有译文', zh.slice(0, 40).every(Boolean));
-  check('后 24 槽为空但存在', zh.slice(40).length === 24 && zh.slice(40).every(x => x === ''));
+  const r = simulate(raw);
+  check('64 条请求 → 413 且不分配同尺寸数组', r.status === 413 && r.zh.length === 0);
 }
 {
-  const zh = simulate(['a', 'b']);
-  check('2 条请求 → 返回 2 槽', zh.length === 2);
+  const raw = Array.from({ length: 40 }, (_, i) => 'text ' + i);
+  const r = simulate(raw);
+  check('40 条请求 → 返回 40 槽', r.status === 200 && r.zh.length === 40);
 }
 {
-  const zh = simulate([]);
-  check('空请求 → 空数组', zh.length === 0);
+  const r = simulate([]);
+  check('空请求 → 空数组', r.status === 200 && r.zh.length === 0);
 }
 
 // ---- 前端对齐校验：长度相等才不会熔断 ----
 console.log('[3] 前端对齐校验在修好后不会熔断');
 {
-  const raw = Array.from({ length: 64 }, (_, i) => 't' + i);
-  const zh = simulate(raw);
-  check('d.zh.length === texts.length', zh.length === raw.length);
+  const raw = Array.from({ length: 40 }, (_, i) => 't' + i);
+  const r = simulate(raw);
+  check('合法批次返回槽数严格对齐', r.status === 200 && r.zh.length === raw.length);
 }
 
 // ---- Gemini 失败原因透传 ----

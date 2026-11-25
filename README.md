@@ -56,6 +56,16 @@ GitHub 趋势榜的手机客户端，以 PWA 形态运行，可"添加到主屏�
 
 ## 文件
 
+### 本地回归测试
+
+需要 Python 3 与 Node.js；运行完整离线回归套件：
+
+```bash
+sh tests/run.sh
+```
+
+该入口先检查 Python 语法并构建 Worker，再运行 KV / 前端 / Worker 行为测试；Worker 运行时测试会使用刚构建的 `/tmp/ts_worker.js`。
+
 ```
 index.html              前端全部逻辑（单文件，无构建步骤）
 worker.template.js      Worker 源码，__ASSETS__ 处会被替换成内联资源
@@ -64,7 +74,7 @@ upload_worker.py        上传（multipart，携带 TR_KV 绑定）
 deploy.sh               打包 + 上传 + 验证一条龙
 cloud_sync.py           云端增量翻译（跑在 GitHub Actions，本地不用管）
 translations.json       译表兜底快照（KV 不可用时由 Worker 内联返回）
-tests/                  回归测试（5 套，全部不联网）
+tests/                  回归测试与 `sh tests/run.sh` 一键入口（全部不联网）
 .github/workflows/daily-translate.yml   每日定时任务
 make_icons.py           生成 PNG 图标（Pillow）
 manifest.webmanifest    PWA 清单
