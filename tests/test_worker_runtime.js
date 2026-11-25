@@ -67,10 +67,11 @@ function loadWorker(env) {
   return { handle: ctx.handle, env, ctx };
 }
 
-async function call(w, pathname, { method = 'GET', body } = {}) {
+async function call(w, pathname, { method = 'GET', body, rawBody } = {}) {
   const url = new URL('https://x.workers.dev' + pathname);
   const req = new Request(url, method === 'POST'
-    ? { method, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }
+    ? { method, body: rawBody === undefined ? JSON.stringify(body) : rawBody,
+        headers: { 'content-type': 'application/json' } }
     : { method });
   const event = { waitUntil() {}, respondWith(r) { this.res = r; } };
   const res = await w.handle(req, event, w.env);
@@ -81,7 +82,7 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
 }
 
 (async () => {
-  console.log('[1] 64 条请求：返回长度必须等于请求长度');
+  console.log('[1] 64 条请求：超出契约应在分配数组前拒绝');
   {
     const w = loadWorker({
       TR_KV: { get: async () => JSON.stringify(KV.table) },
@@ -89,13 +90,50 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
     });
     const texts = Array.from({ length: 64 }, (_, i) => 'probe english text number ' + i);
     const r = await call(w, '/api/tr', { method: 'POST', body: { texts } });
-    check('HTTP 200', r.status === 200, 'status=' + r.status + ' body=' + r.text.slice(0, 150));
-    check('zh 长度 === 64', r.json && r.json.zh.length === 64, r.json ? 'len=' + r.json.zh.length : 'no json');
-    check('前 40 槽有译文', r.json && r.json.zh.slice(0, 40).every(Boolean));
-    check('后 24 槽为空串但存在', r.json && r.json.zh.slice(40).every(x => x === ''));
+    check('HTTP 413', r.status === 413, 'status=' + r.status + ' body=' + r.text.slice(0, 150));
+    check('响应不按输入长度膨胀', r.json && r.json.zh.length === 0, r.json ? 'len=' + r.json.zh.length : 'no json');
+    check('超限请求未调用 Gemini', geminiCalls === 0, 'calls=' + geminiCalls);
   }
 
-  console.log('[2] 缓存命中：不发上游请求');
+  console.log('[2] 正常大小批次：长度严格对齐');
+  {
+    const w = loadWorker({
+      TR_KV: { get: async () => JSON.stringify(KV.table) },
+      GEMINI_KEYS: 'k1 k2', GROQ_API_KEY: 'g',
+    });
+    const texts = Array.from({ length: 40 }, (_, i) => 'probe english text number ' + i);
+    const r = await call(w, '/api/tr', { method: 'POST', body: { texts } });
+    check('HTTP 200', r.status === 200, 'status=' + r.status + ' body=' + r.text.slice(0, 150));
+    check('zh 长度 === 40', r.json && r.json.zh.length === 40, r.json ? 'len=' + r.json.zh.length : 'no json');
+    check('全部有译文', r.json && r.json.zh.every(Boolean));
+  }
+
+  console.log('[3] 请求形状在调用翻译前校验');
+  {
+    const before = geminiCalls;
+    const w = loadWorker({ TR_KV: {}, GEMINI_KEYS: 'k1', GROQ_API_KEY: '' });
+    const badType = await call(w, '/api/tr', { method: 'POST', body: { texts: ['valid text', 7] } });
+    check('非字符串条目返回 400', badType.status === 400);
+    check('非字符串条目未调用 Gemini', geminiCalls === before);
+    const longOne = await call(w, '/api/tr', { method: 'POST', body: { texts: ['x'.repeat(20001)] } });
+    check('超长单条不炸整批（留空槽）', longOne.status === 200 && longOne.json.zh.length === 1 && longOne.json.zh[0] === '',
+      'status=' + longOne.status + ' body=' + (longOne.json ? JSON.stringify(longOne.json) : longOne.text.slice(0, 80)));
+    check('超长单条未调用 Gemini', geminiCalls === before);
+    const wrongMethod = await call(w, '/api/tr', { method: 'PUT' });
+    check('不支持的方法返回 405', wrongMethod.status === 405);
+  }
+
+  console.log('[4] 请求体在JSON解析前有硬上限');
+  {
+    const before = geminiCalls;
+    const w = loadWorker({ TR_KV: {}, GEMINI_KEYS: 'k1', GROQ_API_KEY: '' });
+    const rawBody = JSON.stringify({ texts: ['x'.repeat(270 * 1024)] });
+    const r = await call(w, '/api/tr', { method: 'POST', rawBody });
+    check('大于 256 KiB 返回 413', r.status === 413, 'status=' + r.status);
+    check('解析前拒绝，不调用 Gemini', geminiCalls === before, 'calls=' + (geminiCalls - before));
+  }
+
+  console.log('[5] 缓存命中：不发上游请求');
   {
     const before = geminiCalls;
     const w = loadWorker({
@@ -108,7 +146,7 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
     check('未调用 Gemini', geminiCalls === before, 'calls=' + (geminiCalls - before));
   }
 
-  console.log('[3] Gemini 429 且无 Groq → 透传 429（不是 502）');
+  console.log('[6] Gemini 429 且无 Groq → 透传 429（不是 502）');
   {
     geminiMode = '429';
     const w = loadWorker({ TR_KV: { get: async () => '{}' }, GEMINI_KEYS: 'k1', GROQ_API_KEY: '' });
@@ -119,7 +157,7 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
     geminiMode = 'ok';
   }
 
-  console.log('[4] 无任何密钥 → 503 但 zh 长度仍对齐');
+  console.log('[7] 无任何密钥 → 503 但 zh 长度仍对齐');
   {
     const w = loadWorker({ TR_KV: { get: async () => '{}' }, GEMINI_KEYS: '', GROQ_API_KEY: '' });
     const r = await call(w, '/api/tr', { method: 'POST', body: { texts: ['a b c', 'd e f'] } });
@@ -127,7 +165,7 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
     check('zh 长度 === 2', r.json && r.json.zh.length === 2, r.json ? 'len=' + r.json.zh.length : 'no json');
   }
 
-  console.log('[5] KV 读失败时不影响翻译（回退到实时通道）');
+  console.log('[8] KV 读失败时不影响翻译（回退到实时通道）');
   {
     const w = loadWorker({
       TR_KV: { get: async () => { throw new Error('kv down'); } },
@@ -137,7 +175,7 @@ async function call(w, pathname, { method = 'GET', body } = {}) {
     check('仍然 200 并给出译文', r.status === 200 && r.json.zh[0], 'status=' + r.status + ' body=' + r.text.slice(0, 150));
   }
 
-  console.log('[6] /health 反映绑定状态');
+  console.log('[9] /health 反映绑定状态');
   {
     const w = loadWorker({ TR_KV: {}, GEMINI_KEYS: 'k', GROQ_API_KEY: '' });
     const r = await call(w, '/health');

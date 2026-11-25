@@ -5,8 +5,8 @@
 """
 import importlib.util
 import json
-import sys
 import pathlib
+import sys
 
 SRC = pathlib.Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('cloud_sync', SRC / 'cloud_sync.py')
@@ -76,22 +76,43 @@ cs.http = lambda *a, **kw: (200, json.dumps({'a': '甲', 'b': '乙'}, ensure_asc
 t = cs.kv_get('tr.json')
 check('200 正常表原样返回', t == {'a': '甲', 'b': '乙'})
 
-# ---------- 3. main() 读表失败必须中止，不得写回 ----------
-print('[3] main()：KV 读失败 → 立即退出，不写 KV')
+for bad_table in ({'a': 3}, {'a': None}, {'success': True}):
+    cs.http = lambda *a, _body=json.dumps(bad_table), **kw: (200, _body)
+    try:
+        cs.kv_get('tr.json'); check('非字符串键值/伪API对象拒绝', False, repr(bad_table))
+    except cs.KvUnavailable:
+        check('非字符串键值/伪API对象拒绝', True)
+
+# ---------- 3. 写入回执必须明确 success:true ----------
+print('[3] kv_put：必须收到明确写入成功回执')
+real_http = cs.http
+cs.http = lambda *a, **kw: (200, '{"success":false}')
+check('HTTP 200 + success:false → 写入失败', cs.kv_put('tr.json', {}) is False)
+cs.http = lambda *a, **kw: (200, '{"success":true}')
+check('HTTP 200 + success:true → 写入成功', cs.kv_put('tr.json', {}) is True)
+
+# ---------- 4. main() 读表失败必须中止，不得写回 ----------
+print('[4] main()：KV 读失败 → 立即退出，不写 KV')
 puts = []
-def run_main(kv_status, kv_body, texts=('Some new english text',)):
+def run_main(kv_status, kv_body, texts=('Some new english text',), translation=None, put_body='{"success":true}'):
     puts.clear()
     cs.CF_ACC = 'acct'; cs.CF_TOK = 'tok'; cs.KV_ID = 'ns'
     cs.GEMINI_KEYS = ['k1']
     cs.collect = lambda: list(texts)
+    if translation is not None:
+        cs.gemini_translate = translation
     def _h(method, url, data=None, headers=None, timeout=120, stdin_text=None):
         if method == 'GET' and '/values/' in url:
             return kv_status, kv_body
         if method == 'PUT' and '/values/' in url:
-            puts.append(stdin_text); return 200, '{"success":true}'
+            puts.append(stdin_text); return 200, put_body
         return 0, ''
     cs.http = _h
     return cs.main()
+
+# Exercise main(), not only kv_put(): a false API receipt must fail the job.
+rc = run_main(404, '{"success":false}', translation=lambda batch, key: ['有效译文'], put_body='{"success":false}')
+check('HTTP 200 + success:false → main 失败', rc == 1, 'rc=%s' % rc)
 
 # 关键：给翻译函数装桩，让「读表失败但翻译成功」这条路径真的会走到写回。
 # 不装桩的话，读表失败后翻译也失败 → 不写回 → 测试会假绿（变异负控已实证）。
@@ -156,6 +177,33 @@ if puts:
     written = json.loads(puts[0])
     got = [k for k in written if k.startswith('text number')]
     check('8 条全部翻出（无丢失）', len(got) == 8, 'got=%d' % len(got))
+
+# ---------- 7. 部分/全部译文失败不可被 Actions 报成成功 ----------
+print('[6] 译文失败会形成非零终态')
+rc = run_main(200, json.dumps({'existing': '已有译文'}, ensure_ascii=False),
+              texts=('unfinished english phrase',), translation=lambda batch, key: [''])
+check('空译文没有覆盖旧表', rc == 1, 'rc=%s' % rc)
+check('空译文不写入KV', len(puts) == 0, 'puts=%d' % len(puts))
+
+rc = run_main(200, json.dumps({'existing': '已有译文'}, ensure_ascii=False),
+              texts=('unfinished english phrase',), translation=lambda batch, key: ['unfinished english phrase'])
+check('回吐原文视为翻译失败', rc == 1, 'rc=%s' % rc)
+check('原文没有作为伪译文写入KV', len(puts) == 0, 'puts=%d' % len(puts))
+
+mixed = lambda batch, key: ['有效译文' if 'first' in t else '' for t in batch]
+rc = run_main(200, json.dumps({'existing': '已有译文'}, ensure_ascii=False),
+              texts=('first english phrase', 'second english phrase'), translation=mixed)
+check('部分失败退出码非零', rc == 1, 'rc=%s' % rc)
+# 形状异常必须拆分，且不完整 list 不可借 zip 静默丢失尾项
+calls = {'n': 0}
+def short_response(batch, key):
+    calls['n'] += 1
+    if len(batch) > 1:
+        return ['少一项']
+    return ['完整译文']
+rc = run_main(200, json.dumps({'existing': '已有译文'}, ensure_ascii=False),
+              texts=('first english phrase', 'second english phrase'), translation=short_response)
+check('部分响应先拆分、最终无静默丢项', rc == 0 and calls['n'] == 3, 'rc=%s calls=%s' % (rc, calls['n']))
 
 cs.http = real_http
 print()
