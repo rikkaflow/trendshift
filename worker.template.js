@@ -493,6 +493,103 @@ async function api(url, ctx, env, request) {
 
   if (path === '/api/mentions') return await mentions(ctx);
 
+  /* ---------- 雷达：发现，而不是「相似」 ----------
+     官方的 You might also like 优化相关性，最像某仓库的东西必然是它的仿制品
+     （实测 minimind 页面的 8 条全是 minimind 复刻）。雷达要的是惊喜，
+     所以用三条正交的轴相乘：
+       相关（在用户兴趣内）× 意外（大概率没听过）× 有价值（真能用）
+     任一为 0 结果就是 0：只相关 = 仿制品，只意外 = 噪声，只高星 = 熟面孔。
+     分数在服务端算，改判据不用重新部署前端。 */
+  if (path === '/api/radar') {
+    const seed = (p.get('seed') || '').toLowerCase();   // 可选：以某个仓库为起点
+    const n = Math.min(Math.max(+(p.get('n') || 40) || 40, 1), 120);
+    const lang = (p.get('lang') || '').toLowerCase();
+
+    /* 兴趣画像。默认值来自本机 88 个 star 的真实统计（Kotlin 30%、
+       proxy 系 ≈60 个命中、agent/llm 22 个），可在设置里改。 */
+    const wantLangs = new Set((p.get('langs') || 'Kotlin,Dart,Java,Swift')
+      .split(',').map(x => x.trim()).filter(Boolean));
+    const wantWords = (p.get('words') ||
+      'android,ios,proxy,vpn,clash,v2ray,sing-box,vless,vmess,trojan,' +
+      'agent,llm,gemini,codex,claude,chatgpt,ai,cloudflare,telegram,' +
+      'manga,comic,music,video,player,reader,download,skills,automation,' +
+      'hermes,rikka,mihon,obsidian')
+      .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+
+    /* ★ 字段名必须和候选池对象一致（l/d/t/s/best/periods）。
+       池里是 slim 短名，这里写 e.language / e.description 会恒为 undefined，
+       结果是所有仓库相关性和价值都是 0、雷达静默返回空数组。 */
+    const relOf = (e) => {
+      let s = 0;
+      if (wantLangs.has(e.l)) s += 0.5;
+      const txt = ((e.d || '') + ' ' + (e.t || []).join(' ')).toLowerCase();
+      let hits = 0;
+      for (const w of wantWords) if (txt.includes(w)) hits++;
+      s += Math.min(hits, 3) * 0.17;
+      return Math.min(s, 1);
+    };
+    /* 意外性：星数越低越可能没听过。10 万星以上给 0——那种仓库人人都知道。 */
+    const surOf = (stars) => Math.max(0, Math.min(1,
+      1 - (Math.log10(Math.max(stars || 1, 1)) - 3) / 2));
+    /* 价值：必须「有验证」才算有价值。
+       ★ 描述完整只是「能判断」，不是「有价值」——一个从没上过榜、排名很差的
+       仓库，描述写得再好也不能推荐。所以上榜期数是价值的**前置门槛**：
+       0 期 = 0 分，否则后面三项才有意义。
+       （这个漏洞是「乘不是加」的测试逼出来的：加法下描述分能单独撑起 0.35。） */
+    const valOf = (e) => {
+      if (!(e.periods > 0)) return 0;
+      let s = 0;
+      const d = (e.d || '').length;
+      s += d > 80 ? 0.3 : (d > 40 ? 0.18 : 0);
+      s += Math.min(e.periods, 8) / 8 * 0.4;
+      s += (e.best || 999) <= 10 ? 0.3 : ((e.best || 999) <= 25 ? 0.15 : 0);
+      return Math.min(s, 1);
+    };
+
+    /* 候选池：趋势镜像里的全部历史仓库（2020 个）+ 可选种子仓库的邻居 */
+    const pool = new Map();
+    for (const src of ['daily', 'weekly', 'monthly', 'yearly']) {
+      let data;
+      try { data = await allData(src, ctx); } catch (e) { continue; }
+      for (const e of data.rows) {
+        const k = e.full_name.toLowerCase();
+        let cur = pool.get(k);
+        if (!cur) {
+          cur = {
+            n: e.full_name, d: e.description || '', l: e.language || '',
+            s: e.stars_total || 0, c: e.created_at || '',
+            t: e.tags || [], best: e.rank, periods: 0, seen: new Set(),
+          };
+          pool.set(k, cur);
+        }
+        if (e.description && !cur.d) cur.d = e.description;
+        cur.s = Math.max(cur.s, e.stars_total || 0);
+        cur.best = Math.min(cur.best, e.rank);
+        if (!cur.seen.has(e.period_key)) { cur.seen.add(e.period_key); cur.periods++; }
+      }
+    }
+    for (const v of pool.values()) delete v.seen;
+
+    const out = [];
+    for (const e of pool.values()) {
+      if (lang && (e.l || '').toLowerCase() !== lang) continue;
+      const r = relOf(e), s = surOf(e.s), v = valOf(e);
+      const score = r * s * v;
+      if (score <= 0.01) continue;
+      out.push({
+        n: e.n, d: e.d, l: e.l, s: e.s, c: e.c, t: e.t,
+        best: e.best, periods: e.periods,
+        rel: Math.round(r * 100) / 100,
+        sur: Math.round(s * 100) / 100,
+        val: Math.round(v * 100) / 100,
+        score: Math.round(score * 1000) / 1000,
+      });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return json({ n: out.length, items: out.slice(0, n), pool: pool.size }, 900);
+  }
+
+
   /* 翻译代理：Gemini 多 key 优先，Groq 备用（key 都在 Worker secret）。
      ★ 译文缓存是刚需：免费额度按分钟计，不缓存的话每次刷新都重翻。
      ★ 支持 POST {texts:[...]}，避免长文本把 GET URL 撑到几 KB。 */
@@ -786,7 +883,8 @@ async function handle(request, event, env) {
         groq: !!(env && env.GROQ_API_KEY),
       },
       api: ['/api/list', '/api/langs', '/api/periods', '/api/search', '/api/repo',
-        '/api/topics', '/api/topic', '/api/ghtrending', '/api/devs', '/api/stats', '/api/mentions'],
+        '/api/topics', '/api/topic', '/api/ghtrending', '/api/devs', '/api/stats',
+        '/api/mentions', '/api/radar'],
     });
   }
   if (url.pathname.startsWith('/api/')) {

@@ -37,6 +37,16 @@ header{position:sticky;top:0;z-index:20;background:#0b0d12;
 .noise-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .noise-reasons .chip{color:#f87171;border-color:#3a2020;background:#241313}
 .odesc{font-size:11px;color:var(--dim);margin-top:3px;font-weight:400;line-height:1.4}
+/* 雷达：三轴明细必须可见，否则就是黑盒推荐 */
+.radar-head{margin:2px 0 12px}
+.radar-t{font-size:15px;font-weight:700}
+.radar-n{font-size:12px;font-weight:400;color:var(--dim);margin-left:6px}
+.radar-sub{font-size:12px;color:var(--dim);line-height:1.55;margin-top:4px}
+.radar-why{color:var(--acc);border-color:#2b3350;background:#181d2b}
+.radar-axes{display:flex;gap:10px;margin-top:8px;font-size:11px;color:var(--dim);
+  font-variant-numeric:tabular-nums}
+.radar-axes .sc{margin-left:auto;color:var(--acc);font-weight:700}
+.rcard{border-left:2px solid #2b3350}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}
 .tabs::-webkit-scrollbar{display:none}
@@ -238,13 +248,13 @@ body.detail header,body.detail main,body.detail footer{display:none}
 /* 栏目定义。默认顺序按使用频率：日更榜单最常用，长期/统计类靠后。
    用户可在界面里拖动排序或隐藏（存 localStorage）。 */
 const TFS = [
-  ['weekly','本周'],['daily','今日'],['mentions','热议'],['topics','主题'],
+  ['radar','雷达'],['weekly','本周'],['daily','今日'],['mentions','热议'],['topics','主题'],
   ['monthly','本月'],['ghtrend','热门'],['devs','开发者'],['yearly','今年'],['stats','统计'],
 ];
 const DEFAULT_ORDER = TFS.map(t => t[0]);
 const TAB_LABEL = Object.fromEntries(TFS);
 const BOARD = new Set(['daily','weekly','monthly','yearly']);
-const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions']);
+const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions','radar']);
 const st = {
   tf:'weekly', lang:'', sort:'rank', period:null, q:'',
   data:null, err:null, langs:null, zh:true, cur:null,
@@ -704,7 +714,8 @@ function render(){
   if (!d) return;
 
   /* 这几个栏目不过滤：徽标必须归零，否则切过来还挂着上一个栏目的数字 */
-  if (d.topics || d.topic || d.ghtrend || d.devs || d.stats) { st.noiseCount = 0; updateFcount(); }
+  if (d.topics || d.topic || d.ghtrend || d.devs || d.stats || d.radar) { st.noiseCount = 0; updateFcount(); }
+  if (d.radar) { renderRadar(d.radar); return; }
   if (d.topics) { renderTopics(d.topics); return; }
   if (d.topic)  { renderTopic(d.topic);  return; }
   if (d.ghtrend) { renderGh(d.ghtrend);  return; }
@@ -927,6 +938,58 @@ function T(text){
   return zh || text;
 }
 function descOf(e){ return T(e.d || ''); }
+
+/* ================= 雷达：发现，而不是「相似」 =================
+   官方详情页的 You might also like 优化相关性——最像某仓库的东西必然是它的
+   仿制品（实测 minimind 页面 8 条全是 minimind 复刻）。雷达要的是惊喜，
+   所以用三条正交的轴相乘：
+     相关（在兴趣内）× 意外（大概率没听过）× 有价值（真能用）
+   任一为 0 就是 0：只相关 = 仿制品，只意外 = 噪声，只高星 = 熟面孔。
+   分数在服务端算（/api/radar），改判据不用重新部署前端。 */
+function radarCard(e, i){
+  const stars = k(e.s);
+  const why = [];
+  if (e.rel >= 0.8) why.push('对口');
+  if (e.sur >= 0.8) why.push('冷门');
+  if (e.val >= 0.7) why.push('扎实');
+  return '<article class="card rcard" data-name="' + esc(e.n) + '">' +
+    '<div class="rank' + (i === 0 ? ' r1' : i === 1 ? ' r2' : i === 2 ? ' r3' : '') + '">' + (i + 1) + '</div>' +
+    '<div class="body">' +
+      '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
+        '<span class="gain">' + stars + '★</span></div>' +
+      '<div class="meta">' +
+        (e.l ? esc(e.l) + ' · ' : '') +
+        '最好第 ' + e.best + ' 名 · 上榜 ' + e.periods + ' 期' +
+      '</div>' +
+      (e.d ? '<div class="desc" data-i18n="' + esc(e.d) + '">' + esc(T(e.d)) + '</div>' : '') +
+      '<div class="chips">' +
+        (e.t || []).slice(0, 3).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
+        why.map(w => '<span class="chip radar-why">' + w + '</span>').join('') +
+      '</div>' +
+      /* 三轴明细：让「为什么推这个」可查。不做黑盒推荐。 */
+      '<div class="radar-axes">' +
+        '<span>对口 ' + Math.round(e.rel * 100) + '</span>' +
+        '<span>冷门 ' + Math.round(e.sur * 100) + '</span>' +
+        '<span>扎实 ' + Math.round(e.val * 100) + '</span>' +
+        '<span class="sc">' + e.score.toFixed(2) + '</span>' +
+      '</div>' +
+    '</div></article>';
+}
+
+function renderRadar(d){
+  const items = (d && d.items) || [];
+  if (!items.length) {
+    $('#list').innerHTML = '<div class="empty">雷达暂时没找到候选<br>' +
+      '<span style="font-size:12px">可能是候选池太小，或兴趣画像太窄</span></div>';
+    return;
+  }
+  const head = '<div class="radar-head">' +
+    '<div class="radar-t">雷达 <span class="radar-n">' + items.length + ' / ' + (d.pool || 0) + '</span></div>' +
+    '<div class="radar-sub">按「对口 × 冷门 × 扎实」排序。分数低不代表不好，只代表不够意外。' +
+    '点开任意一条可以看仓库详情。</div>' +
+  '</div>';
+  $('#list').innerHTML = head + items.map(radarCard).join('');
+}
 
 /* ================= 过滤器（减法，不是加栏目） =================
    官方站把三类东西塞进阅读路径：广告/追踪脚本、赞助位、以及「推广腔」的社区内容。
@@ -1161,7 +1224,9 @@ async function refresh(force){
   st.data = null; st.err = null;
   skeleton(5);
   try {
-    if (st.tf === 'mentions') {
+    if (st.tf === 'radar') {
+      st.data = { radar: await api('api/radar', { n: 40 }) };
+    } else if (st.tf === 'mentions') {
       st.data = { mentions: await api('api/mentions') };
     } else if (st.tf === 'topics') {
       st.data = st.topicSlug
