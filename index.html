@@ -1004,23 +1004,36 @@ function filterMentions(items, f){
     if (a) counts.set(a, (counts.get(a) || 0) + 1);
   }
   const seenText = new Set();
+  const seenAuthor = new Set();
   const keep = [], drop = [];
   for (const m of list) {
     const body = m.text || '';
     const text = (m.title || '') + '\n' + body;
+    const bare = body.replace(/https?:\/\/\S+/g, '').trim();
     const reasons = [];
     const key = normText(body || m.title);
     if (f.dupe && key && seenText.has(key)) reasons.push('dupe');
     if (key) seenText.add(key);
     const author = (m.author || '').toLowerCase();
-    if (f.spam && author && (counts.get(author) || 0) >= 3) reasons.push('spam');
-    const owner = (m.repo || '').split('/')[0].toLowerCase();
-    if (f.self && owner && author &&
-        (owner === author || author.startsWith(owner.slice(0, 6)) || owner.startsWith(author.slice(0, 6)))) {
-      reasons.push('self');
+    /* ★ 刷屏保留第一条。
+       实测线上样本：同一账号把「10 个开源仓库清单」贴到 10 个不同仓库。
+       全挡掉 = 用户完全看不到这条内容，但内容本身是有价值的信息，
+       作者的行为不该连坐内容。所以留首条、挡其余——重复清掉了，信息没丢。
+       同一账号发的是**不同**内容（≥3 条）时，首条也留：那是高产不是刷量，
+       真正该挡的是把同一段话反复贴。 */
+    if (f.spam && author && (counts.get(author) || 0) >= 3) {
+      if (seenAuthor.has(author)) reasons.push('spam');
+      seenAuthor.add(author);
     }
+    /* ★ 自荐只在「没有实质内容」时才算噪声。
+       实测：自荐但有 230~280 字具体技术细节的帖子（讲清做了什么、怎么做的、
+       遇到什么问题）是这批里信息量最高的内容，挡掉它们等于把用户最想看的东西剪了。
+       所以判据是「自荐 AND 正文薄」，不是「自荐」。 */
+    const owner = (m.repo || '').split('/')[0].toLowerCase();
+    const isSelf = f.self && owner && author &&
+      (owner === author || author.startsWith(owner.slice(0, 6)) || owner.startsWith(author.slice(0, 6)));
+    if (isSelf && bare.length < 120) reasons.push('self');
     if (f.promo && promoHit(text)) reasons.push('promo');
-    const bare = body.replace(/https?:\/\/\S+/g, '').trim();
     if (f.thin && bare.length < 25) reasons.push('thin');
     (reasons.length ? drop : keep).push(reasons.length ? { item: m, reasons } : m);
   }
@@ -1817,8 +1830,8 @@ function renderFilterPanel(){
      这类面板最容易变成一堆看不懂的复选框。 */
   const SW = [
     ['promo', '推广腔', 'Introducing / What’s new / free trial / 加微信 这类自我介绍体'],
-    ['self', '自荐', '仓库 owner 和发帖账号同名'],
-    ['spam', '刷屏', '同一账号在这一批里发了 3 条以上'],
+    ['self', '自荐且无内容', '仓库 owner 和发帖账号同名，且正文不到 120 字（有实质内容的保留）'],
+    ['spam', '刷屏', '同一账号在这一批里发了 3 条以上，只留第一条'],
     ['dupe', '同文', '同一段文案被贴到多个仓库'],
     ['thin', '无实质正文', '去掉链接后不到 25 个字'],
   ];

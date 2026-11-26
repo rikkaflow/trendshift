@@ -52,6 +52,13 @@ const { filterMentions, filterBoard, mentionsView, mentionCardHtml, reasonsHtml,
 
 /* 样本：真实上游 JSON → 前端用的精简形状（与 worker /api/mentions 的映射一致） */
 const rawMentions = JSON.parse(fs.readFileSync(path.join(FIX, 'mentions-2026-11-26.json'), 'utf8'));
+const lateRaw = JSON.parse(fs.readFileSync(path.join(FIX, 'mentions-2026-11-26-late.json'), 'utf8'));
+const lateMentions = lateRaw.map(x => ({
+  id: x.id, plat: x.platform, repo: x.repository_full_name,
+  title: x.title || '', text: (x.content || '').slice(0, 2000),
+  author: x.author_handle || '', link: x.link, at: x.posted_at,
+}));
+
 const mentions = rawMentions.map(x => ({
   id: x.id, plat: x.platform, repo: x.repository_full_name,
   title: x.title || '', text: (x.content || '').slice(0, 2000),
@@ -93,17 +100,19 @@ console.log('[2] 默认规则不得误杀：真实样本里的正常条目必须
 
 console.log('[3] 每类规则都要真的命中（否则规则是死的）');
 {
-  const { drop } = filterMentions(mentions, FILTER_DEFAULTS);
+  const { keep, drop } = filterMentions(mentions, FILTER_DEFAULTS);
   const hit = r => drop.filter(d => d.reasons.includes(r)).map(d => d.item.repo);
   const promo = hit('promo'), self = hit('self'), spam = hit('spam'), dupe = hit('dupe'), thin = hit('thin');
   check('promo 命中 ≥3 条', promo.length >= 3, 'got=' + promo.length + ' ' + JSON.stringify(promo));
-  check('self 命中 ≥2 条', self.length >= 2, 'got=' + self.length + ' ' + JSON.stringify(self));
-  /* 这两条走的是不同分支：BoraBaysal 是 owner/author 完全相同，
-     Maveri-Q vs @Maveriq_ 只靠前缀匹配（破折号 vs 下划线）。
-     只断言「≥2 条」时删掉前缀分支测试依然绿——那等于没覆盖这条判据。 */
-  check('self 命中完全同名（owner==author）', self.includes('borabaysal/Agent_Supply_Chain_Auditor'));
-  check('self 命中仅前缀相似（Maveri-Q vs @Maveriq_）', self.includes('Maveri-Q/Gumshoe'),
+  /* 这一份样本里三条自荐帖子正文都有 266~276 字的具体技术细节——
+     它们是这批里信息量最高的内容，默认必须留下。自荐本身不是噪声。 */
+  check('自荐但内容扎实的不被挡（样本里 3 条全留）', self.length === 0,
     'self=' + JSON.stringify(self));
+  const keptRepos = keep.map(m => m.repo);
+  for (const n of ['borabaysal/Agent_Supply_Chain_Auditor', 'Maveri-Q/Gumshoe',
+    'tarikcaykara/predicted-funding-aggregator']) {
+    check('自荐有内容 → 保留 ' + n, keptRepos.includes(n));
+  }
   check('spam 命中 ≥3 条', spam.length >= 3, 'got=' + spam.length + ' ' + JSON.stringify(spam));
   check('dupe 命中 ≥1 条', dupe.length >= 1, 'got=' + dupe.length + ' ' + JSON.stringify(dupe));
   check('thin 命中 ≥1 条', thin.length >= 1, 'got=' + thin.length + ' ' + JSON.stringify(thin));
@@ -221,6 +230,44 @@ console.log('[8] 端到端：真实样本经视图模型后，用户实际看到
   }
   const htmlAll = v.items.map(m => mentionCardHtml(m, null)).join('');
   check('可见集合里没有 dim 卡片', !/card dim/.test(htmlAll));
+}
+
+console.log('[9] 第二份样本（线上真实数据）：自荐的两种情形必须区分开');
+{
+  const { keep, drop } = filterMentions(lateMentions, FILTER_DEFAULTS);
+  const selfDropped = drop.filter(d => d.reasons.includes('self')).map(d => d.item.repo);
+  const keptRepos = keep.map(m => m.repo);
+
+  /* 薄自荐（38 字「看看这个仪表盘有多美」）→ 挡 */
+  check('薄自荐被挡：dashboard-design-skill',
+    selfDropped.includes('abdiraimov-otabek/dashboard-design-skill'),
+    JSON.stringify(selfDropped));
+  check('薄自荐被挡：Domain-papers',
+    selfDropped.includes('JDRedding/Domain-papers'), JSON.stringify(selfDropped));
+
+  /* 有内容的（240/250/234 字，讲了做法和遇到的问题）→ 必须留 */
+  for (const n of ['landar26/stolnk-skill', 'dougsillars/bittensor_banhammer', 'Guryevmn/hashorlease']) {
+    check('厚自荐保留 ' + n, keptRepos.includes(n), 'dropped=' + JSON.stringify(selfDropped));
+  }
+
+  /* 同一段西班牙语文案贴到 10 个仓库：只留 1 条，其余按同文挡掉 */
+  const es = lateMentions.filter(m => /NO PARECE LEGAL/i.test(m.text || ''));
+  check('西班牙语刷屏组共 10 条', es.length === 10, 'got=' + es.length);
+  const esKept = es.filter(m => keptRepos.includes(m.repo));
+  const esDropped = es.filter(m => !keptRepos.includes(m.repo));
+  check('同文组只保留 1 条（不是全挡，也不是全留）', esKept.length === 1,
+    'kept=' + esKept.length + ' ' + JSON.stringify(esKept.map(m => m.repo)));
+  check('同文组其余 9 条按同文挡掉', esDropped.length === 9, 'dropped=' + esDropped.length);
+  check('同文挡掉的条目原因里含 dupe',
+    esDropped.every(m => {
+      const d = drop.find(x => x.item === m);
+      return d && d.reasons.includes('dupe');
+    }));
+
+  /* 过滤率：这份样本是 13/25 = 52% */
+  check('第二份样本过滤率在 30%~70%',
+    drop.length / lateMentions.length >= 0.3 && drop.length / lateMentions.length <= 0.7,
+    'got=' + drop.length + '/' + lateMentions.length);
 }
 
 console.log('');
