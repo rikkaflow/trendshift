@@ -114,6 +114,12 @@ console.log('[3] 每类规则都要真的命中（否则规则是死的）');
     check('自荐有内容 → 保留 ' + n, keptRepos.includes(n));
   }
   check('spam 命中 ≥3 条', spam.length >= 3, 'got=' + spam.length + ' ' + JSON.stringify(spam));
+  /* 同一账号刷的三条「Alpaca-py / Twelve Data」正文都不到 120 字：
+     留首条等于把垃圾放出来，所以整组都要挡。 */
+  check('刷屏组里正文薄的首条也不放行（Finnhub）',
+    spam.includes('Finnhub-Stock-API/finnhub-python'), JSON.stringify(spam));
+  check('刷屏组里正文薄的首条也不放行（massive-com）',
+    spam.includes('massive-com/client-python'), JSON.stringify(spam));
   check('dupe 命中 ≥1 条', dupe.length >= 1, 'got=' + dupe.length + ' ' + JSON.stringify(dupe));
   check('thin 命中 ≥1 条', thin.length >= 1, 'got=' + thin.length + ' ' + JSON.stringify(thin));
   /* 具体到条目：这三条是「自我介绍体」的典型，必须被 promo 抓住 */
@@ -258,6 +264,8 @@ console.log('[9] 第二份样本（线上真实数据）：自荐的两种情形
   check('同文组只保留 1 条（不是全挡，也不是全留）', esKept.length === 1,
     'kept=' + esKept.length + ' ' + JSON.stringify(esKept.map(m => m.repo)));
   check('同文组其余 9 条按同文挡掉', esDropped.length === 9, 'dropped=' + esDropped.length);
+  check('刷屏组里正文厚的首条必须留下（plausible/analytics 734 字）',
+    keptRepos.includes('plausible/analytics'), 'dropped=' + JSON.stringify(drop.map(d => d.item.repo)));
   check('同文挡掉的条目原因里含 dupe',
     esDropped.every(m => {
       const d = drop.find(x => x.item === m);

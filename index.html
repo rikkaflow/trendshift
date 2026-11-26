@@ -1015,15 +1015,16 @@ function filterMentions(items, f){
     if (f.dupe && key && seenText.has(key)) reasons.push('dupe');
     if (key) seenText.add(key);
     const author = (m.author || '').toLowerCase();
-    /* ★ 刷屏保留第一条。
-       实测线上样本：同一账号把「10 个开源仓库清单」贴到 10 个不同仓库。
-       全挡掉 = 用户完全看不到这条内容，但内容本身是有价值的信息，
-       作者的行为不该连坐内容。所以留首条、挡其余——重复清掉了，信息没丢。
-       同一账号发的是**不同**内容（≥3 条）时，首条也留：那是高产不是刷量，
-       真正该挡的是把同一段话反复贴。 */
+    /* ★ 刷屏保留第一条，但只有它本身有内容时才留。
+       实测线上样本：同一账号把「10 个开源仓库清单」（734 字）贴到 10 个不同仓库，
+       全挡 = 用户完全看不到这条内容，但它本身有价值 → 留首条。
+       另一组同账号刷的是「Alpaca-py / Twelve Data」这种几十字的空泛贴，
+       留首条只会把垃圾放出来 → 整组挡掉。
+       所以判据是「刷屏 AND（不是首条 OR 正文薄）」。 */
     if (f.spam && author && (counts.get(author) || 0) >= 3) {
-      if (seenAuthor.has(author)) reasons.push('spam');
+      const first = !seenAuthor.has(author);
       seenAuthor.add(author);
+      if (!first || bare.length < 120) reasons.push('spam');
     }
     /* ★ 自荐只在「没有实质内容」时才算噪声。
        实测：自荐但有 230~280 字具体技术细节的帖子（讲清做了什么、怎么做的、
