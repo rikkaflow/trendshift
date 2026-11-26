@@ -22,6 +22,35 @@ header{position:sticky;top:0;z-index:20;background:#0b0d12;
 .top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .logo{font-weight:700;font-size:17px;letter-spacing:-.2px}
 .logo b{color:var(--acc)}
+/* 过滤器入口：这是减法，不是新栏目。徽标只在有东西被挡掉时显示数字。 */
+.fbtn{margin-left:auto;font-size:12px;color:var(--dim);border:1px solid var(--line);
+  background:var(--card);border-radius:999px;padding:5px 11px;white-space:nowrap}
+.fbtn b{color:var(--acc);font-variant-numeric:tabular-nums;margin-left:3px}
+/* 被过滤条目：压暗 + 划掉名字，但正文仍可读——用户要能判断「它是不是误杀」。 */
+.card.dim{opacity:.45}
+.card.dim .name{text-decoration:line-through}
+.noise-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  font-size:12px;color:var(--dim);background:var(--card);border:1px dashed var(--line);
+  border-radius:11px;padding:9px 12px;margin:4px 0 8px}
+.noise-bar .why{flex:1;min-width:0;color:#6f7686}
+.noise-bar button{color:var(--acc);font-size:12px;text-decoration:underline}
+.noise-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.noise-reasons .chip{color:#f87171;border-color:#3a2020;background:#241313}
+.odesc{font-size:11px;color:var(--dim);margin-top:3px;font-weight:400;line-height:1.4}
+/* 排序面板里「打开默认」那一行 */
+.orow.def{border-color:#2b3350;background:#141824}
+.odef{font-size:10px;color:var(--acc);border:1px solid #2b3350;background:#181d2b;
+  border-radius:5px;padding:1px 5px;margin-left:7px;vertical-align:1px}
+/* 雷达：三轴明细必须可见，否则就是黑盒推荐 */
+.radar-head{margin:2px 0 12px}
+.radar-t{font-size:15px;font-weight:700}
+.radar-n{font-size:12px;font-weight:400;color:var(--dim);margin-left:6px}
+.radar-sub{font-size:12px;color:var(--dim);line-height:1.55;margin-top:4px}
+.radar-why{color:var(--acc);border-color:#2b3350;background:#181d2b}
+.radar-axes{display:flex;gap:10px;margin-top:8px;font-size:11px;color:var(--dim);
+  font-variant-numeric:tabular-nums}
+.radar-axes .sc{margin-left:auto;color:var(--acc);font-weight:700}
+.rcard{border-left:2px solid #2b3350}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}
 .tabs::-webkit-scrollbar{display:none}
@@ -179,6 +208,7 @@ body.detail header,body.detail main,body.detail footer{display:none}
 <header>
   <div class="top">
     <div class="logo">Trend<b>shift</b></div>
+    <button class="fbtn" id="fbtn">过滤器<b id="fcount" style="display:none"></b></button>
   </div>
   <div class="tabs" id="tabs"></div>
   <div class="row2" id="rowSort">
@@ -222,22 +252,40 @@ body.detail header,body.detail main,body.detail footer{display:none}
 /* 栏目定义。默认顺序按使用频率：日更榜单最常用，长期/统计类靠后。
    用户可在界面里拖动排序或隐藏（存 localStorage）。 */
 const TFS = [
-  ['weekly','本周'],['daily','今日'],['mentions','热议'],['topics','主题'],
+  ['radar','雷达'],['weekly','本周'],['daily','今日'],['mentions','热议'],['topics','主题'],
   ['monthly','本月'],['ghtrend','热门'],['devs','开发者'],['yearly','今年'],['stats','统计'],
 ];
 const DEFAULT_ORDER = TFS.map(t => t[0]);
 const TAB_LABEL = Object.fromEntries(TFS);
 const BOARD = new Set(['daily','weekly','monthly','yearly']);
-const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions']);
+const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions','radar']);
 const st = {
-  tf:'weekly', lang:'', sort:'rank', period:null, q:'',
+  /* tf 由 loadTabPrefs() 决定（= 排序里第一个可见栏目）。
+     这里留空字符串是刻意的：写死 'weekly' 会让默认值有两个来源，
+     改了一处忘了另一处就出现「排序第一是雷达、打开还是本周」。 */
+  tf:'', lang:'', sort:'rank', period:null, q:'',
   data:null, err:null, langs:null, zh:true, cur:null,
   metric:'stars', statYear:null, statMonth:null,
   order: null, hidden: null, mcache: null,
   pages: null, periodsLeft: null, hasMore: false, loading: false,
   repoToken: 0, refreshToken: 0, pendingState: null,
+  filters: null, showNoise: false, noiseCount: 0,
 };
 /* 标签顺序与隐藏项（本地持久化） */
+/* 默认入口判据：排序里第一个**可见**的栏目。
+   纯函数，供 loadTabPrefs / 排序面板「完成」/ 测试三处共用——
+   三处各写一遍就会漂移（旧实现就是写死 weekly，导致排序和默认入口脱钩）。 */
+function defaultTab(order, hidden){
+  return (order || []).find(id => !hidden.has(id)) || 'weekly';
+}
+/* 「完成」时该不该跳到新默认：
+   默认入口变了 → 跳（用户刚把它移到第一位，总得看见效果）
+   当前栏目被隐藏 → 跳
+   只是调换后面的顺序 → 不跳（纯整理，不该把人拽走） */
+function shouldJumpToDefault(prevDefault, newDefault, curTf, hidden){
+  return newDefault !== prevDefault || hidden.has(curTf);
+}
+
 function loadTabPrefs(){
   const o = read('ts:order');
   const h = read('ts:hidden');
@@ -247,7 +295,13 @@ function loadTabPrefs(){
   st.hidden = new Set(Array.isArray(h) ? h.filter(id => DEFAULT_ORDER.includes(id)) : []);
   // 至少要留一个可见，否则界面会空白
   if (st.hidden.size >= DEFAULT_ORDER.length) st.hidden = new Set();
-  if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+  /* 默认打开哪个栏目 = 排序里第一个**可见**的。
+     旧实现写死 'weekly'，于是「排序」和「默认入口」是两件不相干的事：
+     用户把雷达排到第一位，打开还是进本周。
+     现在两者合一——想换默认入口，在排序面板里把它移到第一就行，
+     不需要第二个开关（减法：一个设置项解决两个诉求）。
+     openFromHash() 之后如果带 hash 会用视图覆盖，这里只是「无 hash 冷启动」的落点。 */
+  st.tf = defaultTab(st.order, st.hidden);
 }
 function saveTabPrefs(){
   save('ts:order', st.order);
@@ -665,15 +719,30 @@ function renderStats(d){
     }).join('');
 }
 
+/* 顶栏徽标：只在有东西被挡时显示数字。0 就彻底不出现——
+   常驻的「0」会让用户以为过滤器没生效。 */
+function updateFcount(){
+  const el = $('#fcount');
+  if (!el) return;
+  const n = st.noiseCount || 0;
+  if (n > 0) { el.textContent = n; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
 function render(){
   const d = st.data;
+  bindNoiseBar();
   if (st.err) {
     $('#list').innerHTML = '<div class="err">加载失败：' + esc(st.err) + '<br><button id="retry">重试</button></div>';
     const b = $('#retry'); if (b) b.onclick = () => refresh(true);
+    updateFcount();
     return;
   }
   if (!d) return;
 
+  /* 这几个栏目不过滤：徽标必须归零，否则切过来还挂着上一个栏目的数字 */
+  if (d.topics || d.topic || d.ghtrend || d.devs || d.stats || d.radar) { st.noiseCount = 0; updateFcount(); }
+  if (d.radar) { renderRadar(d.radar); return; }
   if (d.topics) { renderTopics(d.topics); return; }
   if (d.topic)  { renderTopic(d.topic);  return; }
   if (d.ghtrend) { renderGh(d.ghtrend);  return; }
@@ -681,23 +750,26 @@ function render(){
   if (d.stats)  { renderStats(d.stats);  return; }
 
   if (d.mentions) {
-    if (!d.mentions.items.length) { $('#list').innerHTML = '<div class="empty">暂无热议</div>'; return; }
-    $('#list').innerHTML = d.mentions.items.map(m => {
-      const t = (m.at || '').replace('T', ' ').slice(5, 16);
-      return '<article class="card" data-mention="' + m.id + '"' +
-        (m.repo ? ' data-name="' + esc(m.repo) + '"' : '') + '>' +
-        '<div class="body">' +
-          '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
-            '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
-          '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
-          (m.text ? '<div class="desc" data-i18n="' + esc(m.text) + '">' + esc(T(m.text)) + '</div>' : '') +
-          (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
-        '</div></article>';
-    }).join('');
+    const all = d.mentions.items || [];
+    const view = mentionsView(all, st.filters, st.showNoise);
+    st.noiseCount = view.dropped.length;
+    updateFcount();
+    if (!all.length) { $('#list').innerHTML = '<div class="empty">暂无热议</div>'; return; }
+    /* 全被挡掉时也要给出提示条，否则用户看到空白会以为站点坏了 */
+    const bar = noiseBarHtml(view.dropped.length, whySummary(view.dropped));
+    if (!view.items.length) {
+      $('#list').innerHTML = bar + '<div class="empty">这一批全是推广/刷屏，已全部挡掉<br>' +
+        '点「改规则」可以放宽</div>';
+      bindNoiseBar();
+      return;
+    }
+    $('#list').innerHTML = bar + view.items.map(m => mentionCardHtml(m, view.reasonsOf(m))).join('');
+    bindNoiseBar();
     return;
   }
 
   if (d.search) {
+    st.noiseCount = 0; updateFcount();
     if (!d.search.items.length) {
       $('#list').innerHTML = '<div class="empty">没有匹配的仓库（需 ≥2 字符）</div>';
       return;
@@ -713,15 +785,36 @@ function render(){
 
 /* 榜单累积渲染。full=true 整块重建（翻译更新/切筛选），false 时只追加新期次，
    避免刷到第 10 期后每次触底都重绘几百张卡片。 */
+/* 一期的视图模型：先过滤，再把「挡了几条」挂在期次头。
+   过滤结果按 pages 长度 + 规则签名缓存，避免每次追加都重算整段历史。 */
+function boardView(){
+  const sig = JSON.stringify(st.filters) + '|' + (st.showNoise ? 1 : 0) + '|' +
+    (st.pages || []).map(p => p.period + ':' + p.items.length).join(',');
+  if (st.bview && st.bview.sig === sig) return st.bview.pages;
+  const pages = (st.pages || []).map(pg => {
+    const { keep, drop } = filterBoard(pg.items, pg.prev);
+    return { period: pg.period, prev: pg.prev, keep, drop };
+  });
+  st.bview = { sig, pages };
+  return pages;
+}
 function pageHtml(pg){
+  const dim = st.showNoise && pg.drop.length
+    ? pg.drop.map(d => card(d.item, pg.prev, d.reasons)).join('')
+    : '';
   return '<div class="pgroup" data-period="' + esc(pg.period) + '">' +
-    pg.items.map(e => card(e, pg.prev)).join('') + '</div>';
+    (pg.drop.length ? noiseBarHtml(pg.drop.length, whySummary(pg.drop)) : '') +
+    pg.keep.map(e => card(e, pg.prev)).join('') +
+    dim +
+    '</div>';
 }
 
 function renderBoard(full){
-  const pages = st.pages || [];
+  const pages = boardView();
   const list = $('#list');
   if (!pages.length) { list.innerHTML = ''; list.dataset.rendered = '0'; return; }
+  st.noiseCount = pages.reduce((n, p) => n + p.drop.length, 0);
+  updateFcount();
 
   const rendered = +(list.dataset.rendered || 0);
   const canAppend = !full && rendered > 0 && pages.length > rendered && $('#loadmore');
@@ -873,7 +966,256 @@ function T(text){
 }
 function descOf(e){ return T(e.d || ''); }
 
-function card(e, prev){
+/* ================= 雷达：发现，而不是「相似」 =================
+   官方详情页的 You might also like 优化相关性——最像某仓库的东西必然是它的
+   仿制品（实测 minimind 页面 8 条全是 minimind 复刻）。雷达要的是惊喜，
+   所以用三条正交的轴相乘：
+     相关（在兴趣内）× 意外（大概率没听过）× 有价值（真能用）
+   任一为 0 就是 0：只相关 = 仿制品，只意外 = 噪声，只高星 = 熟面孔。
+   分数在服务端算（/api/radar），改判据不用重新部署前端。 */
+function radarCard(e, i){
+  const stars = k(e.s);
+  const why = [];
+  if (e.rel >= 0.8) why.push('对口');
+  if (e.sur >= 0.8) why.push('冷门');
+  if (e.val >= 0.7) why.push('扎实');
+  return '<article class="card rcard" data-name="' + esc(e.n) + '">' +
+    '<div class="rank' + (i === 0 ? ' r1' : i === 1 ? ' r2' : i === 2 ? ' r3' : '') + '">' + (i + 1) + '</div>' +
+    '<div class="body">' +
+      '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
+        '<span class="gain">' + stars + '★</span></div>' +
+      '<div class="meta">' +
+        (e.l ? esc(e.l) + ' · ' : '') +
+        '最好第 ' + e.best + ' 名 · 上榜 ' + e.periods + ' 期' +
+      '</div>' +
+      (e.d ? '<div class="desc" data-i18n="' + esc(e.d) + '">' + esc(T(e.d)) + '</div>' : '') +
+      '<div class="chips">' +
+        (e.t || []).slice(0, 3).map(t => '<span class="chip">' + esc(t) + '</span>').join('') +
+        why.map(w => '<span class="chip radar-why">' + w + '</span>').join('') +
+      '</div>' +
+      /* 三轴明细：让「为什么推这个」可查。不做黑盒推荐。 */
+      '<div class="radar-axes">' +
+        '<span>对口 ' + Math.round(e.rel * 100) + '</span>' +
+        '<span>冷门 ' + Math.round(e.sur * 100) + '</span>' +
+        '<span>扎实 ' + Math.round(e.val * 100) + '</span>' +
+        '<span class="sc">' + e.score.toFixed(2) + '</span>' +
+      '</div>' +
+    '</div></article>';
+}
+
+function renderRadar(d){
+  const items = (d && d.items) || [];
+  if (!items.length) {
+    $('#list').innerHTML = '<div class="empty">雷达暂时没找到候选<br>' +
+      '<span style="font-size:12px">可能是候选池太小，或兴趣画像太窄</span></div>';
+    return;
+  }
+  const head = '<div class="radar-head">' +
+    '<div class="radar-t">雷达 <span class="radar-n">' + items.length + ' / ' + (d.pool || 0) + '</span></div>' +
+    '<div class="radar-sub">按「对口 × 冷门 × 扎实」排序。分数低不代表不好，只代表不够意外。' +
+    '点开任意一条可以看仓库详情。</div>' +
+  '</div>';
+  $('#list').innerHTML = head + items.map(radarCard).join('');
+}
+
+/* ================= 过滤器（减法，不是加栏目） =================
+   官方站把三类东西塞进阅读路径：广告/追踪脚本、赞助位、以及「推广腔」的社区内容。
+   我们这边本来就没有广告（构建产物里 0 个第三方广告/追踪域名，见 tests/test_noise.js），
+   所以真正需要剪的是**内容噪声**——实测样本（2026-11-26 热议 25 条）：
+     13 条是推广模板 / 自荐 / 同一账号刷屏 / 同文贴多个仓库（52%）。
+   设计原则：被过滤的条目不删除，压暗后原地保留，一键可展开。
+   用户必须能看见「它挡了什么」，否则误杀无从判断，也就等于又一个黑盒。 */
+const FILTER_DEFAULTS = {
+  promo: true,       // 推广腔：Introducing / What's new / free trial / waitlist / hackathon…
+  self: true,        // 自荐：仓库 owner 与发帖账号同名
+  spam: true,        // 刷屏：同一账号在这一批里 ≥3 条
+  dupe: true,        // 同文：同一段文案被贴到多个仓库
+  thin: true,        // 无实质正文：去掉链接后 < 25 字
+  minStars: 0,       // 榜单：最少总星数（0 = 不过滤）
+  minAge: 0,         // 榜单：最少仓龄天数（0 = 不过滤）
+  hideSeen: false,   // 榜单：隐藏上一期已经出现过的
+};
+/* 推广腔模板。只收「自我介绍体」，不收技术名词——宁可漏杀，不可误杀。
+   每条都要能在真实样本里找到出处，否则就是凭想象加规则。 */
+const PROMO_PATTERNS = [
+  /\bintroducing\b/i,
+  /\bwhat'?s new (in|at)\b/i,
+  /\b(join|join us in) (our|the) (community|waitlist|discord|beta)\b/i,
+  /\b(free trial|early access|waitlist|pre-?launch|pre-?order)\b/i,
+  /\bhackathon\b/i,
+  /\bsign ?up (now|today|for)\b/i,
+  /\b(dm|message) (me|us)\b/i,
+  /\blaunch(ing)? (day|week)\b/i,
+  /\bwe (just )?(launched|shipped|built|released)\b/i,
+  /\bnow (available|live) (on|at|for)\b/i,
+  /\btry it (now|free|today)\b/i,
+  /私信|加微信|扫码|进群|免费试用|内测名额|预约体验|限时优惠/,
+];
+const REASON_LABEL = {
+  promo:'推广', self:'自荐', spam:'刷屏', dupe:'同文', thin:'无内容',
+  lowstars:'低星', newrepo:'太新', seen:'已看过',
+};
+
+function loadFilters(){
+  const f = read('ts:filters');
+  const out = Object.assign({}, FILTER_DEFAULTS);
+  if (f && typeof f === 'object') {
+    for (const k of Object.keys(FILTER_DEFAULTS)) {
+      if (typeof f[k] === typeof FILTER_DEFAULTS[k] && f[k] !== null) out[k] = f[k];
+    }
+  }
+  st.filters = out;
+  st.showNoise = read('ts:shownoise') === true;
+}
+function saveFilters(){
+  save('ts:filters', st.filters);
+  save('ts:shownoise', st.showNoise);
+}
+/* 归一化文案：去链接、去标点、只留字母数字汉字。
+   用来判「同一段话被贴到多个仓库」——这类刷量在原始文本上只有仓库名不同。 */
+function normText(t){
+  return String(t || '').toLowerCase()
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '')
+    .slice(0, 80);
+}
+function promoHit(text){
+  for (const p of PROMO_PATTERNS) if (p.test(text)) return true;
+  return false;
+}
+/* 热议条目过滤。纯函数：只吃 items，只吐 {keep, drop}，不碰 DOM/状态。
+   这样它可以在 Node 里被单测直接跑真实样本。 */
+function filterMentions(items, f){
+  f = f || st.filters || FILTER_DEFAULTS;
+  const list = Array.isArray(items) ? items : [];
+  const counts = new Map();
+  for (const m of list) {
+    const a = (m.author || '').toLowerCase();
+    if (a) counts.set(a, (counts.get(a) || 0) + 1);
+  }
+  const seenText = new Set();
+  const seenAuthor = new Set();
+  const keep = [], drop = [];
+  for (const m of list) {
+    const body = m.text || '';
+    const text = (m.title || '') + '\n' + body;
+    const bare = body.replace(/https?:\/\/\S+/g, '').trim();
+    const reasons = [];
+    const key = normText(body || m.title);
+    if (f.dupe && key && seenText.has(key)) reasons.push('dupe');
+    if (key) seenText.add(key);
+    const author = (m.author || '').toLowerCase();
+    /* ★ 刷屏保留第一条，但只有它本身有内容时才留。
+       实测线上样本：同一账号把「10 个开源仓库清单」（734 字）贴到 10 个不同仓库，
+       全挡 = 用户完全看不到这条内容，但它本身有价值 → 留首条。
+       另一组同账号刷的是「Alpaca-py / Twelve Data」这种几十字的空泛贴，
+       留首条只会把垃圾放出来 → 整组挡掉。
+       所以判据是「刷屏 AND（不是首条 OR 正文薄）」。 */
+    if (f.spam && author && (counts.get(author) || 0) >= 3) {
+      const first = !seenAuthor.has(author);
+      seenAuthor.add(author);
+      if (!first || bare.length < 120) reasons.push('spam');
+    }
+    /* ★ 自荐只在「没有实质内容」时才算噪声。
+       实测：自荐但有 230~280 字具体技术细节的帖子（讲清做了什么、怎么做的、
+       遇到什么问题）是这批里信息量最高的内容，挡掉它们等于把用户最想看的东西剪了。
+       所以判据是「自荐 AND 正文薄」，不是「自荐」。 */
+    const owner = (m.repo || '').split('/')[0].toLowerCase();
+    const isSelf = f.self && owner && author &&
+      (owner === author || author.startsWith(owner.slice(0, 6)) || owner.startsWith(author.slice(0, 6)));
+    if (isSelf && bare.length < 120) reasons.push('self');
+    if (f.promo && promoHit(text)) reasons.push('promo');
+    if (f.thin && bare.length < 25) reasons.push('thin');
+    (reasons.length ? drop : keep).push(reasons.length ? { item: m, reasons } : m);
+  }
+  return { keep, drop };
+}
+/* 榜单条目过滤。prev 是上一期的 {name: rank} 映射，用于「已看过」。 */
+function filterBoard(items, prev, f){
+  f = f || st.filters || FILTER_DEFAULTS;
+  const keep = [], drop = [];
+  for (const e of (items || [])) {
+    const reasons = [];
+    if (f.minStars > 0 && (e.s || 0) < f.minStars) reasons.push('lowstars');
+    if (f.minAge > 0) {
+      const days = e.c ? (Date.now() - Date.parse(e.c)) / 864e5 : 9999;
+      if (days < f.minAge) reasons.push('newrepo');
+    }
+    if (f.hideSeen && prev && prev[e.n] != null) reasons.push('seen');
+    (reasons.length ? drop : keep).push(reasons.length ? { item: e, reasons } : e);
+  }
+  return { keep, drop };
+}
+function reasonsHtml(rs){
+  return '<div class="noise-reasons">' +
+    (rs || []).map(r => '<span class="chip">' + esc(REASON_LABEL[r] || r) + '</span>').join('') +
+    '</div>';
+}
+/* 被过滤条目的顶栏：告诉用户挡了几条、为什么、以及怎么展开 */
+function noiseBarHtml(n, why){
+  if (!n) return '';
+  return '<div class="noise-bar">' +
+    '<span>已挡掉 <b style="color:var(--acc)">' + n + '</b> 条</span>' +
+    (why ? '<span class="why">' + esc(why) + '</span>' : '<span class="why"></span>') +
+    '<button class="noise-toggle">' + (st.showNoise ? '收起' : '查看') + '</button>' +
+    '<button class="noise-edit">改规则</button>' +
+  '</div>';
+}
+/* 事件委托一次绑在 #list 上：一个页面可能有多期，每期一条提示条，
+   用 id 会产生重复 id（getElementById 只认第一个，后面几期的按钮全失灵）。 */
+let noiseBound = false;
+function bindNoiseBar(){
+  if (noiseBound) return;
+  noiseBound = true;
+  $('#list').addEventListener('click', ev => {
+    if (ev.target.closest('.noise-toggle')) {
+      ev.stopPropagation();
+      st.showNoise = !st.showNoise; saveFilters(); render();
+      return;
+    }
+    if (ev.target.closest('.noise-edit')) {
+      ev.stopPropagation();
+      openFilterPanel();
+    }
+  }, true);   // 捕获阶段：抢在卡片点击进详情之前吃掉
+}
+/* 把 drop 汇总成一句人话：「推广 4 · 自荐 3 · 刷屏 6」 */
+function whySummary(drop){
+  const c = new Map();
+  for (const d of drop) for (const r of d.reasons) c.set(r, (c.get(r) || 0) + 1);
+  return [...c.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([r, n]) => (REASON_LABEL[r] || r) + ' ' + n)
+    .join(' · ');
+}
+/* 热议列表的视图模型：过滤 + 决定是否把被挡条目也放进来。
+   抽成纯函数是为了能在 Node 里验证「展开真的展开、原因真的渲染」——
+   如果只断言「源码里有 reasonsHtml 这个词」，把调用删掉测试依然绿。 */
+function mentionsView(items, filters, showNoise){
+  const { keep, drop } = filterMentions(items, filters);
+  const why = new Map(drop.map(d => [d.item, d.reasons]));
+  return {
+    items: showNoise ? keep.concat(drop.map(d => d.item)) : keep,
+    dropped: drop,
+    reasonsOf: m => why.get(m) || null,
+  };
+}
+/* 单条热议卡片的 HTML。被挡的压暗并列出原因。 */
+function mentionCardHtml(m, reasons){
+  const t = (m.at || '').replace('T', ' ').slice(5, 16);
+  return '<article class="card' + (reasons && reasons.length ? ' dim' : '') + '" data-mention="' + m.id + '"' +
+    (m.repo ? ' data-name="' + esc(m.repo) + '"' : '') + '>' +
+    '<div class="body">' +
+      '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
+        '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
+      '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
+      (m.text ? '<div class="desc" data-i18n="' + esc(m.text) + '">' + esc(T(m.text)) + '</div>' : '') +
+      (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
+      (reasons && reasons.length ? reasonsHtml(reasons) : '') +
+    '</div></article>';
+}
+
+function card(e, prev, reasons){
   const days = e.c ? (Date.now() - Date.parse(e.c)) / 864e5 : 999;
   const chips = [];
   if (e.l) chips.push('<span class="chip lang">' + esc(e.l) + '</span>');
@@ -889,7 +1231,7 @@ function card(e, prev){
 
   const r = e.r, rc = r === 1 ? ' r1' : r === 2 ? ' r2' : r === 3 ? ' r3' : '';
   const desc = descOf(e);
-  return '<article class="card" data-name="' + esc(e.n) + '">' +
+  return '<article class="card' + (reasons && reasons.length ? ' dim' : '') + '" data-name="' + esc(e.n) + '">' +
     '<div class="rank' + rc + '">' + r + '</div>' +
     '<div class="body">' +
       '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
@@ -898,6 +1240,7 @@ function card(e, prev){
         (e.c ? ' · 建于 ' + esc(e.c.slice(0, 10)) : '') + '</div>' +
       (desc ? '<div class="desc" data-i18n="' + esc(e.d || '') + '">' + esc(desc) + '</div>' : '') +
       (chips.length ? '<div class="chips">' + chips.join('') + '</div>' : '') +
+      (reasons && reasons.length ? reasonsHtml(reasons) : '') +
     '</div></article>';
 }
 
@@ -908,7 +1251,9 @@ async function refresh(force){
   st.data = null; st.err = null;
   skeleton(5);
   try {
-    if (st.tf === 'mentions') {
+    if (st.tf === 'radar') {
+      st.data = { radar: await api('api/radar', { n: 40 }) };
+    } else if (st.tf === 'mentions') {
       st.data = { mentions: await api('api/mentions') };
     } else if (st.tf === 'topics') {
       st.data = st.topicSlug
@@ -933,6 +1278,7 @@ async function refresh(force){
       const all = d.periods || [];
       const startIdx = Math.max(0, all.indexOf(d.period));
       const tail = all.slice(startIdx);          // [W46, W45, W44, ...]
+      st.bview = null;
       st.pages = [{ period: d.period, items: d.items, prev: d.prev }];
       st.periodsLeft = tail.slice(1);            // 剩余更早的
       st.hasMore = st.periodsLeft.length > 0;
@@ -953,6 +1299,7 @@ async function refresh(force){
       st.data = cached;
       // 离线恢复必须同步重建分页，否则 renderBoard 只看到空 pages 就停在骨架屏
       if (cached.items && cached.items.length) {
+        st.bview = null;
         st.pages = [{ period: cached.period, items: cached.items, prev: cached.prev || {} }];
         st.periodsLeft = null;
         st.hasMore = false;
@@ -1349,6 +1696,8 @@ function buildControls(){
 function bindControls(){
   let pressTimer = null, pressed = false, downX = 0, downY = 0;
 
+  $('#fbtn').onclick = () => openFilterPanel();
+
   $('#tabs').addEventListener('pointerdown', ev => {
     const b = ev.target.closest('.tab'); if (!b) return;
     pressed = false;
@@ -1445,6 +1794,7 @@ function bindControls(){
 
 function resetPaging(){
   st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+  st.bview = null;
   st.autoLoads = 0; st.needManual = false;
   st.pagingToken = (st.pagingToken || 0) + 1;   // 作废进行中的翻页
   const l = $('#list'); if (l) l.dataset.rendered = '0';
@@ -1548,6 +1898,111 @@ function renderMention(m){
 /* ---------- 栏目排序面板 ---------- */
 let orderDraft = null, hiddenDraft = null;
 
+/* ---------- 过滤器面板 ----------
+   复用「栏目排序」那套视图/历史栈机制（v:'filters'），
+   不新造路由——同一个页面壳、同一个返回手势行为。 */
+function openFilterPanel(){
+  const depth = ((history.state && history.state._d) || 0) + 1;
+  try { history.pushState({ v: 'filters', _d: depth }, '', '#filters'); } catch(e) {}
+  curView = true; onGuard = false;
+  openFilterView();
+}
+
+/* 只渲染，不碰历史栈（直达 /#filters 或前进后退回来时也要能画出来） */
+function openFilterView(){
+  document.body.classList.add('detail');
+  $('#page').classList.add('on');
+  $('#ptitle').textContent = '过滤器';
+  window.scrollTo(0, 0);
+  renderFilterPanel();
+}
+
+function renderFilterPanel(){
+  const f = st.filters || FILTER_DEFAULTS;
+  /* 每个开关都写清「挡什么」，否则用户只能靠猜——
+     这类面板最容易变成一堆看不懂的复选框。 */
+  const SW = [
+    ['promo', '推广腔', 'Introducing / What’s new / free trial / 加微信 这类自我介绍体'],
+    ['self', '自荐且无内容', '仓库 owner 和发帖账号同名，且正文不到 120 字（有实质内容的保留）'],
+    ['spam', '刷屏', '同一账号在这一批里发了 3 条以上，只留第一条'],
+    ['dupe', '同文', '同一段文案被贴到多个仓库'],
+    ['thin', '无实质正文', '去掉链接后不到 25 个字'],
+  ];
+  const RANGE = [
+    ['minStars', '最少星数', [0, 100, 300, 500, 1000, 3000]],
+    ['minAge', '最少仓龄', [0, 7, 30, 90, 180]],
+  ];
+  const swRows = SW.map(([k, name, desc]) =>
+    '<div class="orow"><div class="oname">' + name +
+      '<div class="odesc">' + esc(desc) + '</div></div>' +
+      '<button class="oic' + (f[k] ? '' : ' on') + '" data-sw="' + k + '">' +
+      (f[k] ? '开' : '关') + '</button></div>').join('');
+  const rgRows = RANGE.map(([key, name, opts]) =>
+    '<div class="orow"><div class="oname">' + name + '</div>' +
+      opts.map(v => '<button class="oic' + (f[key] === v ? '' : ' on') + '" data-rg="' + key + '" data-v="' + v + '">' +
+        (v === 0 ? '不限' : (key === 'minStars' ? k(v) : v + '天')) + '</button>').join('') +
+    '</div>').join('');
+  const seenRow = '<div class="orow"><div class="oname">已看过' +
+    '<div class="odesc">隐藏上一期已经在榜的仓库，只看这一期真正的新面孔</div></div>' +
+    '<button class="oic' + (f.hideSeen ? '' : ' on') + '" data-sw="hideSeen">' +
+    (f.hideSeen ? '开' : '关') + '</button></div>';
+
+  $('#pbody').innerHTML =
+    '<div class="hint">这一页只做减法：把没有信息量的条目挡在外面。' +
+      '被挡的不会消失——列表顶部会显示「已挡掉 N 条」，点「查看」可以逐条看，' +
+      '确认是误杀就把对应规则关掉。</div>' +
+    '<div class="sect-h">热议</div>' +
+    '<div class="olist">' + swRows + '</div>' +
+    '<div class="sect-h" style="margin-top:18px">榜单</div>' +
+    '<div class="olist">' + rgRows + seenRow + '</div>' +
+    '<div class="pactions">' +
+      '<button class="btn" id="fReset">恢复默认</button>' +
+      '<button class="btn pri" id="fDone">完成</button>' +
+    '</div>';
+
+  const body = $('#pbody');
+  body.onclick = ev => {
+    const sw = ev.target.closest('[data-sw]');
+    const rg = ev.target.closest('[data-rg]');
+    if (sw) {
+      const k = sw.dataset.sw;
+      st.filters[k] = !st.filters[k];
+      saveFilters();
+      renderFilterPanel();
+      // 面板背后立刻重算，返回时看到的就是新结果
+      if (st.data) render();
+    } else if (rg) {
+      st.filters[rg.dataset.rg] = +rg.dataset.v;
+      saveFilters();
+      renderFilterPanel();
+      if (st.data) render();
+    } else if (ev.target.id === 'fReset') {
+      st.filters = Object.assign({}, FILTER_DEFAULTS);
+      st.showNoise = false;
+      saveFilters();
+      renderFilterPanel();
+      if (st.data) render();
+    } else if (ev.target.id === 'fDone') {
+      closeFilterPanel();
+    }
+  };
+}
+
+function closeFilterPanel(){
+  const isF = history.state && history.state.v === 'filters';
+  const depth = (history.state && history.state._d) || 0;
+  if (isF && depth > 1) {
+    try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+    history.back();
+  } else if (isF) {
+    try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+    closeDetail();
+    if (st.data) render();
+  } else {
+    closeDetail();
+  }
+}
+
 function openTabOrder(){
   orderDraft = st.order.slice();
   hiddenDraft = new Set(st.hidden);
@@ -1572,10 +2027,15 @@ function openOrderView(){
 }
 
 function renderOrderPanel(){
+  const firstVisible = orderDraft.find(id => !hiddenDraft.has(id));
   const rows = orderDraft.map((id, i) => {
     const off = hiddenDraft.has(id);
-    return '<div class="orow' + (off ? ' off' : '') + '">' +
-      '<div class="oname">' + esc(TAB_LABEL[id]) + '</div>' +
+    /* 第一行直接标出「打开就是这里」——否则用户改完顺序不知道默认入口变了。
+       这不是新开关：排序第一 = 默认入口，两者本来就是同一件事。 */
+    const isDefault = !off && id === firstVisible;
+    return '<div class="orow' + (off ? ' off' : '') + (isDefault ? ' def' : '') + '">' +
+      '<div class="oname">' + esc(TAB_LABEL[id]) +
+        (isDefault ? '<span class="odef">打开默认</span>' : '') + '</div>' +
       '<button class="oic" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
       '<button class="oic" data-down="' + i + '"' + (i === orderDraft.length - 1 ? ' disabled' : '') + '>↓</button>' +
       '<button class="oic' + (off ? ' on' : '') + '" data-eye="' + id + '">' + (off ? '隐藏' : '显示') + '</button>' +
@@ -1583,7 +2043,9 @@ function renderOrderPanel(){
   }).join('');
 
   $('#pbody').innerHTML =
-    '<div class="hint">常用栏目放前面。长按顶部标签也能回到这里。</div>' +
+    '<div class="hint">常用的放前面。' +
+      '<b style="color:var(--acc)">排第一的那个就是打开应用时默认进入的栏目</b>——' +
+      '想默认进雷达，把它移到第一位即可。长按顶部标签也能回到这里。</div>' +
     '<div class="olist">' + rows + '</div>' +
     '<div class="pactions">' +
       '<button class="btn" id="oReset">恢复默认</button>' +
@@ -1615,9 +2077,12 @@ function renderOrderPanel(){
     } else if (ev.target.id === 'oDone') {
       const prevTf = st.tf;
       const prevOrder = st.order.join(',');
+      /* 改之前的「默认入口」= 当时排序里第一个可见项 */
+      const prevDefault = defaultTab(st.order, st.hidden);
       st.order = orderDraft.slice();
       st.hidden = new Set(hiddenDraft);
-      if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+      const newDefault = defaultTab(st.order, st.hidden);
+      if (shouldJumpToDefault(prevDefault, newDefault, st.tf, st.hidden)) st.tf = newDefault;
       saveTabPrefs();
       buildControls();
 
@@ -1715,6 +2180,7 @@ function renderState(state){
   }
   if (state.v === 'repo') { renderRepo(state.name); return; }
   if (state.v === 'order') { openOrderView(); return; }
+  if (state.v === 'filters') { openFilterView(); return; }
   if (state.v === 'mention') {
     const m = findMention(state.id);
     if (m) renderMention(m); else closeDetail();
@@ -1771,6 +2237,7 @@ function hashOf(state){
   if (state.v === 'mention') return '#mention=' + encodeURIComponent(state.id);
   if (state.v === 'topic') return '#topic=' + encodeURIComponent(state.slug);
   if (state.v === 'order') return '#order';
+  if (state.v === 'filters') return '#filters';
   return location.pathname + location.search;
 }
 
@@ -1891,6 +2358,7 @@ function openFromHash(){
   else if ((m = /^#mention=(.+)$/.exec(h))) state = { v: 'mention', id: decodeURIComponent(m[1]) };
   else if ((m = /^#topic=(.+)$/.exec(h))) state = { v: 'topic', slug: decodeURIComponent(m[1]) };
   else if (h === '#order') state = { v: 'order' };
+  else if (h === '#filters') state = { v: 'filters' };
   if (!state) return null;
   /* 冷启动带 hash 时，先把历史改造成 [列表根] [守卫] 再压目标视图：
      否则详情页下面直接是站外页面，一次手势返回就退出应用。
@@ -1913,6 +2381,7 @@ function openFromHash(){
 }
 
 loadTabPrefs();
+loadFilters();
 loadTrCache();
 buildControls();
 bindControls();
