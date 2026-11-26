@@ -22,6 +22,21 @@ header{position:sticky;top:0;z-index:20;background:#0b0d12;
 .top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .logo{font-weight:700;font-size:17px;letter-spacing:-.2px}
 .logo b{color:var(--acc)}
+/* 过滤器入口：这是减法，不是新栏目。徽标只在有东西被挡掉时显示数字。 */
+.fbtn{margin-left:auto;font-size:12px;color:var(--dim);border:1px solid var(--line);
+  background:var(--card);border-radius:999px;padding:5px 11px;white-space:nowrap}
+.fbtn b{color:var(--acc);font-variant-numeric:tabular-nums;margin-left:3px}
+/* 被过滤条目：压暗 + 划掉名字，但正文仍可读——用户要能判断「它是不是误杀」。 */
+.card.dim{opacity:.45}
+.card.dim .name{text-decoration:line-through}
+.noise-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  font-size:12px;color:var(--dim);background:var(--card);border:1px dashed var(--line);
+  border-radius:11px;padding:9px 12px;margin:4px 0 8px}
+.noise-bar .why{flex:1;min-width:0;color:#6f7686}
+.noise-bar button{color:var(--acc);font-size:12px;text-decoration:underline}
+.noise-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.noise-reasons .chip{color:#f87171;border-color:#3a2020;background:#241313}
+.odesc{font-size:11px;color:var(--dim);margin-top:3px;font-weight:400;line-height:1.4}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}
 .tabs::-webkit-scrollbar{display:none}
@@ -179,6 +194,7 @@ body.detail header,body.detail main,body.detail footer{display:none}
 <header>
   <div class="top">
     <div class="logo">Trend<b>shift</b></div>
+    <button class="fbtn" id="fbtn">过滤器<b id="fcount" style="display:none"></b></button>
   </div>
   <div class="tabs" id="tabs"></div>
   <div class="row2" id="rowSort">
@@ -236,6 +252,7 @@ const st = {
   order: null, hidden: null, mcache: null,
   pages: null, periodsLeft: null, hasMore: false, loading: false,
   repoToken: 0, refreshToken: 0, pendingState: null,
+  filters: null, showNoise: false, noiseCount: 0,
 };
 /* 标签顺序与隐藏项（本地持久化） */
 function loadTabPrefs(){
@@ -665,15 +682,29 @@ function renderStats(d){
     }).join('');
 }
 
+/* 顶栏徽标：只在有东西被挡时显示数字。0 就彻底不出现——
+   常驻的「0」会让用户以为过滤器没生效。 */
+function updateFcount(){
+  const el = $('#fcount');
+  if (!el) return;
+  const n = st.noiseCount || 0;
+  if (n > 0) { el.textContent = n; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
 function render(){
   const d = st.data;
+  bindNoiseBar();
   if (st.err) {
     $('#list').innerHTML = '<div class="err">加载失败：' + esc(st.err) + '<br><button id="retry">重试</button></div>';
     const b = $('#retry'); if (b) b.onclick = () => refresh(true);
+    updateFcount();
     return;
   }
   if (!d) return;
 
+  /* 这几个栏目不过滤：徽标必须归零，否则切过来还挂着上一个栏目的数字 */
+  if (d.topics || d.topic || d.ghtrend || d.devs || d.stats) { st.noiseCount = 0; updateFcount(); }
   if (d.topics) { renderTopics(d.topics); return; }
   if (d.topic)  { renderTopic(d.topic);  return; }
   if (d.ghtrend) { renderGh(d.ghtrend);  return; }
@@ -681,23 +712,26 @@ function render(){
   if (d.stats)  { renderStats(d.stats);  return; }
 
   if (d.mentions) {
-    if (!d.mentions.items.length) { $('#list').innerHTML = '<div class="empty">暂无热议</div>'; return; }
-    $('#list').innerHTML = d.mentions.items.map(m => {
-      const t = (m.at || '').replace('T', ' ').slice(5, 16);
-      return '<article class="card" data-mention="' + m.id + '"' +
-        (m.repo ? ' data-name="' + esc(m.repo) + '"' : '') + '>' +
-        '<div class="body">' +
-          '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
-            '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
-          '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
-          (m.text ? '<div class="desc" data-i18n="' + esc(m.text) + '">' + esc(T(m.text)) + '</div>' : '') +
-          (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
-        '</div></article>';
-    }).join('');
+    const all = d.mentions.items || [];
+    const view = mentionsView(all, st.filters, st.showNoise);
+    st.noiseCount = view.dropped.length;
+    updateFcount();
+    if (!all.length) { $('#list').innerHTML = '<div class="empty">暂无热议</div>'; return; }
+    /* 全被挡掉时也要给出提示条，否则用户看到空白会以为站点坏了 */
+    const bar = noiseBarHtml(view.dropped.length, whySummary(view.dropped));
+    if (!view.items.length) {
+      $('#list').innerHTML = bar + '<div class="empty">这一批全是推广/刷屏，已全部挡掉<br>' +
+        '点「改规则」可以放宽</div>';
+      bindNoiseBar();
+      return;
+    }
+    $('#list').innerHTML = bar + view.items.map(m => mentionCardHtml(m, view.reasonsOf(m))).join('');
+    bindNoiseBar();
     return;
   }
 
   if (d.search) {
+    st.noiseCount = 0; updateFcount();
     if (!d.search.items.length) {
       $('#list').innerHTML = '<div class="empty">没有匹配的仓库（需 ≥2 字符）</div>';
       return;
@@ -713,15 +747,36 @@ function render(){
 
 /* 榜单累积渲染。full=true 整块重建（翻译更新/切筛选），false 时只追加新期次，
    避免刷到第 10 期后每次触底都重绘几百张卡片。 */
+/* 一期的视图模型：先过滤，再把「挡了几条」挂在期次头。
+   过滤结果按 pages 长度 + 规则签名缓存，避免每次追加都重算整段历史。 */
+function boardView(){
+  const sig = JSON.stringify(st.filters) + '|' + (st.showNoise ? 1 : 0) + '|' +
+    (st.pages || []).map(p => p.period + ':' + p.items.length).join(',');
+  if (st.bview && st.bview.sig === sig) return st.bview.pages;
+  const pages = (st.pages || []).map(pg => {
+    const { keep, drop } = filterBoard(pg.items, pg.prev);
+    return { period: pg.period, prev: pg.prev, keep, drop };
+  });
+  st.bview = { sig, pages };
+  return pages;
+}
 function pageHtml(pg){
+  const dim = st.showNoise && pg.drop.length
+    ? pg.drop.map(d => card(d.item, pg.prev, d.reasons)).join('')
+    : '';
   return '<div class="pgroup" data-period="' + esc(pg.period) + '">' +
-    pg.items.map(e => card(e, pg.prev)).join('') + '</div>';
+    (pg.drop.length ? noiseBarHtml(pg.drop.length, whySummary(pg.drop)) : '') +
+    pg.keep.map(e => card(e, pg.prev)).join('') +
+    dim +
+    '</div>';
 }
 
 function renderBoard(full){
-  const pages = st.pages || [];
+  const pages = boardView();
   const list = $('#list');
   if (!pages.length) { list.innerHTML = ''; list.dataset.rendered = '0'; return; }
+  st.noiseCount = pages.reduce((n, p) => n + p.drop.length, 0);
+  updateFcount();
 
   const rendered = +(list.dataset.rendered || 0);
   const canAppend = !full && rendered > 0 && pages.length > rendered && $('#loadmore');
@@ -873,7 +928,190 @@ function T(text){
 }
 function descOf(e){ return T(e.d || ''); }
 
-function card(e, prev){
+/* ================= 过滤器（减法，不是加栏目） =================
+   官方站把三类东西塞进阅读路径：广告/追踪脚本、赞助位、以及「推广腔」的社区内容。
+   我们这边本来就没有广告（构建产物里 0 个第三方广告/追踪域名，见 tests/test_noise.js），
+   所以真正需要剪的是**内容噪声**——实测样本（2026-11-26 热议 25 条）：
+     13 条是推广模板 / 自荐 / 同一账号刷屏 / 同文贴多个仓库（52%）。
+   设计原则：被过滤的条目不删除，压暗后原地保留，一键可展开。
+   用户必须能看见「它挡了什么」，否则误杀无从判断，也就等于又一个黑盒。 */
+const FILTER_DEFAULTS = {
+  promo: true,       // 推广腔：Introducing / What's new / free trial / waitlist / hackathon…
+  self: true,        // 自荐：仓库 owner 与发帖账号同名
+  spam: true,        // 刷屏：同一账号在这一批里 ≥3 条
+  dupe: true,        // 同文：同一段文案被贴到多个仓库
+  thin: true,        // 无实质正文：去掉链接后 < 25 字
+  minStars: 0,       // 榜单：最少总星数（0 = 不过滤）
+  minAge: 0,         // 榜单：最少仓龄天数（0 = 不过滤）
+  hideSeen: false,   // 榜单：隐藏上一期已经出现过的
+};
+/* 推广腔模板。只收「自我介绍体」，不收技术名词——宁可漏杀，不可误杀。
+   每条都要能在真实样本里找到出处，否则就是凭想象加规则。 */
+const PROMO_PATTERNS = [
+  /\bintroducing\b/i,
+  /\bwhat'?s new (in|at)\b/i,
+  /\b(join|join us in) (our|the) (community|waitlist|discord|beta)\b/i,
+  /\b(free trial|early access|waitlist|pre-?launch|pre-?order)\b/i,
+  /\bhackathon\b/i,
+  /\bsign ?up (now|today|for)\b/i,
+  /\b(dm|message) (me|us)\b/i,
+  /\blaunch(ing)? (day|week)\b/i,
+  /\bwe (just )?(launched|shipped|built|released)\b/i,
+  /\bnow (available|live) (on|at|for)\b/i,
+  /\btry it (now|free|today)\b/i,
+  /私信|加微信|扫码|进群|免费试用|内测名额|预约体验|限时优惠/,
+];
+const REASON_LABEL = {
+  promo:'推广', self:'自荐', spam:'刷屏', dupe:'同文', thin:'无内容',
+  lowstars:'低星', newrepo:'太新', seen:'已看过',
+};
+
+function loadFilters(){
+  const f = read('ts:filters');
+  const out = Object.assign({}, FILTER_DEFAULTS);
+  if (f && typeof f === 'object') {
+    for (const k of Object.keys(FILTER_DEFAULTS)) {
+      if (typeof f[k] === typeof FILTER_DEFAULTS[k] && f[k] !== null) out[k] = f[k];
+    }
+  }
+  st.filters = out;
+  st.showNoise = read('ts:shownoise') === true;
+}
+function saveFilters(){
+  save('ts:filters', st.filters);
+  save('ts:shownoise', st.showNoise);
+}
+/* 归一化文案：去链接、去标点、只留字母数字汉字。
+   用来判「同一段话被贴到多个仓库」——这类刷量在原始文本上只有仓库名不同。 */
+function normText(t){
+  return String(t || '').toLowerCase()
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '')
+    .slice(0, 80);
+}
+function promoHit(text){
+  for (const p of PROMO_PATTERNS) if (p.test(text)) return true;
+  return false;
+}
+/* 热议条目过滤。纯函数：只吃 items，只吐 {keep, drop}，不碰 DOM/状态。
+   这样它可以在 Node 里被单测直接跑真实样本。 */
+function filterMentions(items, f){
+  f = f || st.filters || FILTER_DEFAULTS;
+  const list = Array.isArray(items) ? items : [];
+  const counts = new Map();
+  for (const m of list) {
+    const a = (m.author || '').toLowerCase();
+    if (a) counts.set(a, (counts.get(a) || 0) + 1);
+  }
+  const seenText = new Set();
+  const keep = [], drop = [];
+  for (const m of list) {
+    const body = m.text || '';
+    const text = (m.title || '') + '\n' + body;
+    const reasons = [];
+    const key = normText(body || m.title);
+    if (f.dupe && key && seenText.has(key)) reasons.push('dupe');
+    if (key) seenText.add(key);
+    const author = (m.author || '').toLowerCase();
+    if (f.spam && author && (counts.get(author) || 0) >= 3) reasons.push('spam');
+    const owner = (m.repo || '').split('/')[0].toLowerCase();
+    if (f.self && owner && author &&
+        (owner === author || author.startsWith(owner.slice(0, 6)) || owner.startsWith(author.slice(0, 6)))) {
+      reasons.push('self');
+    }
+    if (f.promo && promoHit(text)) reasons.push('promo');
+    const bare = body.replace(/https?:\/\/\S+/g, '').trim();
+    if (f.thin && bare.length < 25) reasons.push('thin');
+    (reasons.length ? drop : keep).push(reasons.length ? { item: m, reasons } : m);
+  }
+  return { keep, drop };
+}
+/* 榜单条目过滤。prev 是上一期的 {name: rank} 映射，用于「已看过」。 */
+function filterBoard(items, prev, f){
+  f = f || st.filters || FILTER_DEFAULTS;
+  const keep = [], drop = [];
+  for (const e of (items || [])) {
+    const reasons = [];
+    if (f.minStars > 0 && (e.s || 0) < f.minStars) reasons.push('lowstars');
+    if (f.minAge > 0) {
+      const days = e.c ? (Date.now() - Date.parse(e.c)) / 864e5 : 9999;
+      if (days < f.minAge) reasons.push('newrepo');
+    }
+    if (f.hideSeen && prev && prev[e.n] != null) reasons.push('seen');
+    (reasons.length ? drop : keep).push(reasons.length ? { item: e, reasons } : e);
+  }
+  return { keep, drop };
+}
+function reasonsHtml(rs){
+  return '<div class="noise-reasons">' +
+    (rs || []).map(r => '<span class="chip">' + esc(REASON_LABEL[r] || r) + '</span>').join('') +
+    '</div>';
+}
+/* 被过滤条目的顶栏：告诉用户挡了几条、为什么、以及怎么展开 */
+function noiseBarHtml(n, why){
+  if (!n) return '';
+  return '<div class="noise-bar">' +
+    '<span>已挡掉 <b style="color:var(--acc)">' + n + '</b> 条</span>' +
+    (why ? '<span class="why">' + esc(why) + '</span>' : '<span class="why"></span>') +
+    '<button class="noise-toggle">' + (st.showNoise ? '收起' : '查看') + '</button>' +
+    '<button class="noise-edit">改规则</button>' +
+  '</div>';
+}
+/* 事件委托一次绑在 #list 上：一个页面可能有多期，每期一条提示条，
+   用 id 会产生重复 id（getElementById 只认第一个，后面几期的按钮全失灵）。 */
+let noiseBound = false;
+function bindNoiseBar(){
+  if (noiseBound) return;
+  noiseBound = true;
+  $('#list').addEventListener('click', ev => {
+    if (ev.target.closest('.noise-toggle')) {
+      ev.stopPropagation();
+      st.showNoise = !st.showNoise; saveFilters(); render();
+      return;
+    }
+    if (ev.target.closest('.noise-edit')) {
+      ev.stopPropagation();
+      openFilterPanel();
+    }
+  }, true);   // 捕获阶段：抢在卡片点击进详情之前吃掉
+}
+/* 把 drop 汇总成一句人话：「推广 4 · 自荐 3 · 刷屏 6」 */
+function whySummary(drop){
+  const c = new Map();
+  for (const d of drop) for (const r of d.reasons) c.set(r, (c.get(r) || 0) + 1);
+  return [...c.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([r, n]) => (REASON_LABEL[r] || r) + ' ' + n)
+    .join(' · ');
+}
+/* 热议列表的视图模型：过滤 + 决定是否把被挡条目也放进来。
+   抽成纯函数是为了能在 Node 里验证「展开真的展开、原因真的渲染」——
+   如果只断言「源码里有 reasonsHtml 这个词」，把调用删掉测试依然绿。 */
+function mentionsView(items, filters, showNoise){
+  const { keep, drop } = filterMentions(items, filters);
+  const why = new Map(drop.map(d => [d.item, d.reasons]));
+  return {
+    items: showNoise ? keep.concat(drop.map(d => d.item)) : keep,
+    dropped: drop,
+    reasonsOf: m => why.get(m) || null,
+  };
+}
+/* 单条热议卡片的 HTML。被挡的压暗并列出原因。 */
+function mentionCardHtml(m, reasons){
+  const t = (m.at || '').replace('T', ' ').slice(5, 16);
+  return '<article class="card' + (reasons && reasons.length ? ' dim' : '') + '" data-mention="' + m.id + '"' +
+    (m.repo ? ' data-name="' + esc(m.repo) + '"' : '') + '>' +
+    '<div class="body">' +
+      '<div class="l1"><span class="name">' + esc(m.repo) + '</span>' +
+        '<span class="gain" style="color:var(--dim);font-weight:600">' + esc(m.plat) + '</span></div>' +
+      '<div class="meta">@' + esc(m.author) + ' · ' + esc(t) + ' UTC</div>' +
+      (m.text ? '<div class="desc" data-i18n="' + esc(m.text) + '">' + esc(T(m.text)) + '</div>' : '') +
+      (m.repo ? '<div class="chips"><span class="chip">' + esc(m.repo) + '</span></div>' : '') +
+      (reasons && reasons.length ? reasonsHtml(reasons) : '') +
+    '</div></article>';
+}
+
+function card(e, prev, reasons){
   const days = e.c ? (Date.now() - Date.parse(e.c)) / 864e5 : 999;
   const chips = [];
   if (e.l) chips.push('<span class="chip lang">' + esc(e.l) + '</span>');
@@ -889,7 +1127,7 @@ function card(e, prev){
 
   const r = e.r, rc = r === 1 ? ' r1' : r === 2 ? ' r2' : r === 3 ? ' r3' : '';
   const desc = descOf(e);
-  return '<article class="card" data-name="' + esc(e.n) + '">' +
+  return '<article class="card' + (reasons && reasons.length ? ' dim' : '') + '" data-name="' + esc(e.n) + '">' +
     '<div class="rank' + rc + '">' + r + '</div>' +
     '<div class="body">' +
       '<div class="l1"><span class="name">' + esc(e.n) + '</span>' +
@@ -898,6 +1136,7 @@ function card(e, prev){
         (e.c ? ' · 建于 ' + esc(e.c.slice(0, 10)) : '') + '</div>' +
       (desc ? '<div class="desc" data-i18n="' + esc(e.d || '') + '">' + esc(desc) + '</div>' : '') +
       (chips.length ? '<div class="chips">' + chips.join('') + '</div>' : '') +
+      (reasons && reasons.length ? reasonsHtml(reasons) : '') +
     '</div></article>';
 }
 
@@ -933,6 +1172,7 @@ async function refresh(force){
       const all = d.periods || [];
       const startIdx = Math.max(0, all.indexOf(d.period));
       const tail = all.slice(startIdx);          // [W46, W45, W44, ...]
+      st.bview = null;
       st.pages = [{ period: d.period, items: d.items, prev: d.prev }];
       st.periodsLeft = tail.slice(1);            // 剩余更早的
       st.hasMore = st.periodsLeft.length > 0;
@@ -953,6 +1193,7 @@ async function refresh(force){
       st.data = cached;
       // 离线恢复必须同步重建分页，否则 renderBoard 只看到空 pages 就停在骨架屏
       if (cached.items && cached.items.length) {
+        st.bview = null;
         st.pages = [{ period: cached.period, items: cached.items, prev: cached.prev || {} }];
         st.periodsLeft = null;
         st.hasMore = false;
@@ -1349,6 +1590,8 @@ function buildControls(){
 function bindControls(){
   let pressTimer = null, pressed = false, downX = 0, downY = 0;
 
+  $('#fbtn').onclick = () => openFilterPanel();
+
   $('#tabs').addEventListener('pointerdown', ev => {
     const b = ev.target.closest('.tab'); if (!b) return;
     pressed = false;
@@ -1445,6 +1688,7 @@ function bindControls(){
 
 function resetPaging(){
   st.pages = null; st.periodsLeft = null; st.hasMore = false; st.loading = false;
+  st.bview = null;
   st.autoLoads = 0; st.needManual = false;
   st.pagingToken = (st.pagingToken || 0) + 1;   // 作废进行中的翻页
   const l = $('#list'); if (l) l.dataset.rendered = '0';
@@ -1547,6 +1791,111 @@ function renderMention(m){
 
 /* ---------- 栏目排序面板 ---------- */
 let orderDraft = null, hiddenDraft = null;
+
+/* ---------- 过滤器面板 ----------
+   复用「栏目排序」那套视图/历史栈机制（v:'filters'），
+   不新造路由——同一个页面壳、同一个返回手势行为。 */
+function openFilterPanel(){
+  const depth = ((history.state && history.state._d) || 0) + 1;
+  try { history.pushState({ v: 'filters', _d: depth }, '', '#filters'); } catch(e) {}
+  curView = true; onGuard = false;
+  openFilterView();
+}
+
+/* 只渲染，不碰历史栈（直达 /#filters 或前进后退回来时也要能画出来） */
+function openFilterView(){
+  document.body.classList.add('detail');
+  $('#page').classList.add('on');
+  $('#ptitle').textContent = '过滤器';
+  window.scrollTo(0, 0);
+  renderFilterPanel();
+}
+
+function renderFilterPanel(){
+  const f = st.filters || FILTER_DEFAULTS;
+  /* 每个开关都写清「挡什么」，否则用户只能靠猜——
+     这类面板最容易变成一堆看不懂的复选框。 */
+  const SW = [
+    ['promo', '推广腔', 'Introducing / What’s new / free trial / 加微信 这类自我介绍体'],
+    ['self', '自荐', '仓库 owner 和发帖账号同名'],
+    ['spam', '刷屏', '同一账号在这一批里发了 3 条以上'],
+    ['dupe', '同文', '同一段文案被贴到多个仓库'],
+    ['thin', '无实质正文', '去掉链接后不到 25 个字'],
+  ];
+  const RANGE = [
+    ['minStars', '最少星数', [0, 100, 300, 500, 1000, 3000]],
+    ['minAge', '最少仓龄', [0, 7, 30, 90, 180]],
+  ];
+  const swRows = SW.map(([k, name, desc]) =>
+    '<div class="orow"><div class="oname">' + name +
+      '<div class="odesc">' + esc(desc) + '</div></div>' +
+      '<button class="oic' + (f[k] ? '' : ' on') + '" data-sw="' + k + '">' +
+      (f[k] ? '开' : '关') + '</button></div>').join('');
+  const rgRows = RANGE.map(([key, name, opts]) =>
+    '<div class="orow"><div class="oname">' + name + '</div>' +
+      opts.map(v => '<button class="oic' + (f[key] === v ? '' : ' on') + '" data-rg="' + key + '" data-v="' + v + '">' +
+        (v === 0 ? '不限' : (key === 'minStars' ? k(v) : v + '天')) + '</button>').join('') +
+    '</div>').join('');
+  const seenRow = '<div class="orow"><div class="oname">已看过' +
+    '<div class="odesc">隐藏上一期已经在榜的仓库，只看这一期真正的新面孔</div></div>' +
+    '<button class="oic' + (f.hideSeen ? '' : ' on') + '" data-sw="hideSeen">' +
+    (f.hideSeen ? '开' : '关') + '</button></div>';
+
+  $('#pbody').innerHTML =
+    '<div class="hint">这一页只做减法：把没有信息量的条目挡在外面。' +
+      '被挡的不会消失——列表顶部会显示「已挡掉 N 条」，点「查看」可以逐条看，' +
+      '确认是误杀就把对应规则关掉。</div>' +
+    '<div class="sect-h">热议</div>' +
+    '<div class="olist">' + swRows + '</div>' +
+    '<div class="sect-h" style="margin-top:18px">榜单</div>' +
+    '<div class="olist">' + rgRows + seenRow + '</div>' +
+    '<div class="pactions">' +
+      '<button class="btn" id="fReset">恢复默认</button>' +
+      '<button class="btn pri" id="fDone">完成</button>' +
+    '</div>';
+
+  const body = $('#pbody');
+  body.onclick = ev => {
+    const sw = ev.target.closest('[data-sw]');
+    const rg = ev.target.closest('[data-rg]');
+    if (sw) {
+      const k = sw.dataset.sw;
+      st.filters[k] = !st.filters[k];
+      saveFilters();
+      renderFilterPanel();
+      // 面板背后立刻重算，返回时看到的就是新结果
+      if (st.data) render();
+    } else if (rg) {
+      st.filters[rg.dataset.rg] = +rg.dataset.v;
+      saveFilters();
+      renderFilterPanel();
+      if (st.data) render();
+    } else if (ev.target.id === 'fReset') {
+      st.filters = Object.assign({}, FILTER_DEFAULTS);
+      st.showNoise = false;
+      saveFilters();
+      renderFilterPanel();
+      if (st.data) render();
+    } else if (ev.target.id === 'fDone') {
+      closeFilterPanel();
+    }
+  };
+}
+
+function closeFilterPanel(){
+  const isF = history.state && history.state.v === 'filters';
+  const depth = (history.state && history.state._d) || 0;
+  if (isF && depth > 1) {
+    try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+    history.back();
+  } else if (isF) {
+    try { history.replaceState({ v: null }, '', location.pathname); } catch(e) {}
+    closeDetail();
+    if (st.data) render();
+  } else {
+    closeDetail();
+  }
+}
 
 function openTabOrder(){
   orderDraft = st.order.slice();
@@ -1715,6 +2064,7 @@ function renderState(state){
   }
   if (state.v === 'repo') { renderRepo(state.name); return; }
   if (state.v === 'order') { openOrderView(); return; }
+  if (state.v === 'filters') { openFilterView(); return; }
   if (state.v === 'mention') {
     const m = findMention(state.id);
     if (m) renderMention(m); else closeDetail();
@@ -1771,6 +2121,7 @@ function hashOf(state){
   if (state.v === 'mention') return '#mention=' + encodeURIComponent(state.id);
   if (state.v === 'topic') return '#topic=' + encodeURIComponent(state.slug);
   if (state.v === 'order') return '#order';
+  if (state.v === 'filters') return '#filters';
   return location.pathname + location.search;
 }
 
@@ -1891,6 +2242,7 @@ function openFromHash(){
   else if ((m = /^#mention=(.+)$/.exec(h))) state = { v: 'mention', id: decodeURIComponent(m[1]) };
   else if ((m = /^#topic=(.+)$/.exec(h))) state = { v: 'topic', slug: decodeURIComponent(m[1]) };
   else if (h === '#order') state = { v: 'order' };
+  else if (h === '#filters') state = { v: 'filters' };
   if (!state) return null;
   /* 冷启动带 hash 时，先把历史改造成 [列表根] [守卫] 再压目标视图：
      否则详情页下面直接是站外页面，一次手势返回就退出应用。
@@ -1913,6 +2265,7 @@ function openFromHash(){
 }
 
 loadTabPrefs();
+loadFilters();
 loadTrCache();
 buildControls();
 bindControls();
