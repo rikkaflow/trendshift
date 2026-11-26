@@ -37,6 +37,10 @@ header{position:sticky;top:0;z-index:20;background:#0b0d12;
 .noise-reasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .noise-reasons .chip{color:#f87171;border-color:#3a2020;background:#241313}
 .odesc{font-size:11px;color:var(--dim);margin-top:3px;font-weight:400;line-height:1.4}
+/* 排序面板里「打开默认」那一行 */
+.orow.def{border-color:#2b3350;background:#141824}
+.odef{font-size:10px;color:var(--acc);border:1px solid #2b3350;background:#181d2b;
+  border-radius:5px;padding:1px 5px;margin-left:7px;vertical-align:1px}
 /* 雷达：三轴明细必须可见，否则就是黑盒推荐 */
 .radar-head{margin:2px 0 12px}
 .radar-t{font-size:15px;font-weight:700}
@@ -256,7 +260,10 @@ const TAB_LABEL = Object.fromEntries(TFS);
 const BOARD = new Set(['daily','weekly','monthly','yearly']);
 const FILTERED = new Set(['topics','ghtrend','devs','stats','mentions','radar']);
 const st = {
-  tf:'weekly', lang:'', sort:'rank', period:null, q:'',
+  /* tf 由 loadTabPrefs() 决定（= 排序里第一个可见栏目）。
+     这里留空字符串是刻意的：写死 'weekly' 会让默认值有两个来源，
+     改了一处忘了另一处就出现「排序第一是雷达、打开还是本周」。 */
+  tf:'', lang:'', sort:'rank', period:null, q:'',
   data:null, err:null, langs:null, zh:true, cur:null,
   metric:'stars', statYear:null, statMonth:null,
   order: null, hidden: null, mcache: null,
@@ -265,6 +272,20 @@ const st = {
   filters: null, showNoise: false, noiseCount: 0,
 };
 /* 标签顺序与隐藏项（本地持久化） */
+/* 默认入口判据：排序里第一个**可见**的栏目。
+   纯函数，供 loadTabPrefs / 排序面板「完成」/ 测试三处共用——
+   三处各写一遍就会漂移（旧实现就是写死 weekly，导致排序和默认入口脱钩）。 */
+function defaultTab(order, hidden){
+  return (order || []).find(id => !hidden.has(id)) || 'weekly';
+}
+/* 「完成」时该不该跳到新默认：
+   默认入口变了 → 跳（用户刚把它移到第一位，总得看见效果）
+   当前栏目被隐藏 → 跳
+   只是调换后面的顺序 → 不跳（纯整理，不该把人拽走） */
+function shouldJumpToDefault(prevDefault, newDefault, curTf, hidden){
+  return newDefault !== prevDefault || hidden.has(curTf);
+}
+
 function loadTabPrefs(){
   const o = read('ts:order');
   const h = read('ts:hidden');
@@ -274,7 +295,13 @@ function loadTabPrefs(){
   st.hidden = new Set(Array.isArray(h) ? h.filter(id => DEFAULT_ORDER.includes(id)) : []);
   // 至少要留一个可见，否则界面会空白
   if (st.hidden.size >= DEFAULT_ORDER.length) st.hidden = new Set();
-  if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+  /* 默认打开哪个栏目 = 排序里第一个**可见**的。
+     旧实现写死 'weekly'，于是「排序」和「默认入口」是两件不相干的事：
+     用户把雷达排到第一位，打开还是进本周。
+     现在两者合一——想换默认入口，在排序面板里把它移到第一就行，
+     不需要第二个开关（减法：一个设置项解决两个诉求）。
+     openFromHash() 之后如果带 hash 会用视图覆盖，这里只是「无 hash 冷启动」的落点。 */
+  st.tf = defaultTab(st.order, st.hidden);
 }
 function saveTabPrefs(){
   save('ts:order', st.order);
@@ -2000,10 +2027,15 @@ function openOrderView(){
 }
 
 function renderOrderPanel(){
+  const firstVisible = orderDraft.find(id => !hiddenDraft.has(id));
   const rows = orderDraft.map((id, i) => {
     const off = hiddenDraft.has(id);
-    return '<div class="orow' + (off ? ' off' : '') + '">' +
-      '<div class="oname">' + esc(TAB_LABEL[id]) + '</div>' +
+    /* 第一行直接标出「打开就是这里」——否则用户改完顺序不知道默认入口变了。
+       这不是新开关：排序第一 = 默认入口，两者本来就是同一件事。 */
+    const isDefault = !off && id === firstVisible;
+    return '<div class="orow' + (off ? ' off' : '') + (isDefault ? ' def' : '') + '">' +
+      '<div class="oname">' + esc(TAB_LABEL[id]) +
+        (isDefault ? '<span class="odef">打开默认</span>' : '') + '</div>' +
       '<button class="oic" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
       '<button class="oic" data-down="' + i + '"' + (i === orderDraft.length - 1 ? ' disabled' : '') + '>↓</button>' +
       '<button class="oic' + (off ? ' on' : '') + '" data-eye="' + id + '">' + (off ? '隐藏' : '显示') + '</button>' +
@@ -2011,7 +2043,9 @@ function renderOrderPanel(){
   }).join('');
 
   $('#pbody').innerHTML =
-    '<div class="hint">常用栏目放前面。长按顶部标签也能回到这里。</div>' +
+    '<div class="hint">常用的放前面。' +
+      '<b style="color:var(--acc)">排第一的那个就是打开应用时默认进入的栏目</b>——' +
+      '想默认进雷达，把它移到第一位即可。长按顶部标签也能回到这里。</div>' +
     '<div class="olist">' + rows + '</div>' +
     '<div class="pactions">' +
       '<button class="btn" id="oReset">恢复默认</button>' +
@@ -2043,9 +2077,12 @@ function renderOrderPanel(){
     } else if (ev.target.id === 'oDone') {
       const prevTf = st.tf;
       const prevOrder = st.order.join(',');
+      /* 改之前的「默认入口」= 当时排序里第一个可见项 */
+      const prevDefault = defaultTab(st.order, st.hidden);
       st.order = orderDraft.slice();
       st.hidden = new Set(hiddenDraft);
-      if (st.hidden.has(st.tf)) st.tf = st.order.find(id => !st.hidden.has(id)) || 'weekly';
+      const newDefault = defaultTab(st.order, st.hidden);
+      if (shouldJumpToDefault(prevDefault, newDefault, st.tf, st.hidden)) st.tf = newDefault;
       saveTabPrefs();
       buildControls();
 
